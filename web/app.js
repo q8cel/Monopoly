@@ -3,7 +3,7 @@
 const PCOLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12"];
 const KIND_GLYPH = {
   0: "", 1: "", 2: "\u{1F4B0}", 3: "\u{1F682}", 4: "\u26A1", 5: "\u2753", 6: "\u{1F4E6}",
-  7: "\u23F8\uFE0F", 8: "\u{1F694}", 9: "\u{1F696}",
+  7: "\u23F8\uFE0F", 8: "\u26D3\uFE0F", 9: "\u{1F693}",
 };
 const GROUP_COLORS = ["#8b4513", "#a8d8ea", "#ff9fb2", "#f7941d", "#ff0000", "#b5d33d", "#2e8b57", "#1a1a1a"];
 const KIND_NAMES = { 0: "GO", 1: "Property", 2: "Tax", 3: "Railroad", 4: "Utility", 5: "Chance", 6: "Chest", 7: "Parking", 8: "Jail", 9: "To Jail" };
