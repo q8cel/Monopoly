@@ -779,10 +779,14 @@ func (g *Game) UseCard(pid int) error {
 
 // ---------- auction ----------
 
+const auctionStep = 10
+
 func (g *Game) startAuction(sq, trigger int) {
-	g.St.Auction = &Auction{SQ: sq, Bid: 0, Bidder: -1, Trigger: trigger, Passed: []int{}}
+	// auction starts at the property's full price: the first bidder can
+	// acquire it for that price if no one else wants it
+	g.St.Auction = &Auction{SQ: sq, Bid: g.St.Board[sq].Buy, Bidder: -1, Trigger: trigger, Passed: []int{}}
 	g.St.Phase = "auction"
-	g.log("Auction for square %d (price $%d).", sq, g.St.Board[sq].Buy)
+	g.log("Auction for square %d (starting bid $%d).", sq, g.St.Auction.Bid)
 }
 
 func (g *Game) eligibleBidders() []int {
@@ -815,8 +819,12 @@ func (g *Game) AuctionBid(pid, amount int) error {
 	if amount < 0 {
 		return errors.New("bad amount")
 	}
-	if a.Bidder != -1 && amount <= a.Bid {
-		return fmt.Errorf("bid must be higher than current $%d", a.Bid)
+	minBid := a.Bid
+	if a.Bidder != -1 {
+		minBid = a.Bid + auctionStep // outbid by at least $10
+	}
+	if amount < minBid {
+		return fmt.Errorf("bid must be at least $%d", minBid)
 	}
 	a.Bid = amount
 	a.Bidder = pid
@@ -888,7 +896,7 @@ func (g *Game) awardAuction() {
 		g.finishAuction(a.Trigger)
 		return
 	}
-	if a.Bidder >= 0 && a.Bid > 0 {
+	if a.Bidder >= 0 {
 		w := &g.St.Players[a.Bidder]
 		if a.Bid > w.Cash {
 			g.log("%s wins the auction but cannot pay and goes bankrupt!", w.Name)

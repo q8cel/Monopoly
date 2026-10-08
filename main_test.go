@@ -27,8 +27,12 @@ func aiStep(g *Game) {
 			if passed {
 				continue
 			}
+			minBid := a.Bid
+			if a.Bidder != -1 {
+				minBid = a.Bid + 10
+			}
 			if a.Bidder == -1 || g.rng.Intn(3) == 0 {
-				bid := a.Bid + 1 + g.rng.Intn(15)
+				bid := minBid + 10*g.rng.Intn(3)
 				if bid <= p.Cash {
 					g.AuctionBid(i, bid)
 				} else {
@@ -197,4 +201,47 @@ func checkInvariants(t *testing.T, g *Game, game int) {
 			}
 		}
 	}
+}
+
+func TestAuctionRules(t *testing.T) {
+	g := NewGame()
+	for _, n := range []string{"A", "B", "C"} {
+		if _, err := g.Join(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.Start(0)
+	g.mu.Lock()
+	g.St.Players[1].Cash = 5000
+	g.St.Players[2].Cash = 5000
+	g.startAuction(1, 0) // A triggers; square 1 base price
+	g.mu.Unlock()
+
+	base := g.St.Board[1].Buy
+	if err := g.AuctionBid(1, base-10); err == nil {
+		t.Fatal("first bid below base price must fail")
+	}
+	if err := g.AuctionBid(1, base); err != nil {
+		t.Fatalf("first bid at base price must succeed: %v", err)
+	}
+	if err := g.AuctionBid(0, base+10); err == nil {
+		t.Fatal("trigger must not be able to bid")
+	}
+	if err := g.AuctionBid(2, base+5); err == nil {
+		t.Fatal("outbid must be at least $10")
+	}
+	if err := g.AuctionBid(2, base+10); err != nil {
+		t.Fatalf("valid outbid rejected: %v", err)
+	}
+	if err := g.AuctionPass(1); err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	if g.St.Phase != "turn" || g.St.Props[1].Owner != 2 {
+		t.Fatalf("auction should end with C owning square 1: phase=%s owner=%d", g.St.Phase, g.St.Props[1].Owner)
+	}
+	if g.St.Players[2].Cash != 5000-(base+10) {
+		t.Fatalf("C should pay the winning bid: %d", g.St.Players[2].Cash)
+	}
+	g.mu.Unlock()
 }

@@ -156,8 +156,9 @@ function renderTurnInfo() {
   const d = state.dice;
   let html = "";
   if (state.phase === "auction") {
-    html = `<span><b>Auction</b> \u2014 square ${state.auction.sq} (value $${state.board[state.auction.sq].buy})</span>`;
+    html = `<span><b>Auction</b> \u2014 square ${state.auction.sq}</span>`;
     if (state.auction.bidder >= 0) html += `<span>bid: <b>$${state.auction.bid}</b> by ${esc(state.players[state.auction.bidder].name)}</span>`;
+    else html += `<span>starting bid: <b>$${state.auction.bid}</b> (bids in $10+ steps)</span>`;
   } else if (cur) {
     html = `<span>Turn: <b style="color:${PCOLORS[cur.id % 4]}">${esc(cur.name)}</b></span>`;
     html += `<span class="dice"><span class="die">${d[0] || "?"}</span><span class="die">${d[1] || "?"}</span></span>`;
@@ -221,12 +222,14 @@ function renderAuction() {
   const me = state.players[myId];
   if (me.bankrupt || me.left || me.id === au.trigger) return;
   const passed = au.passed.includes(myId);
+  const minBid = au.bidder >= 0 ? au.bid + 10 : au.bid;
   const row = document.createElement("div");
   row.className = "btnrow";
   const input = document.createElement("input");
   input.type = "number";
-  input.min = au.bid + 1;
-  input.value = au.bid + 1;
+  input.min = minBid;
+  input.step = 10;
+  input.value = minBid;
   input.style.width = "70px";
   row.appendChild(input);
   const bid = document.createElement("button");
