@@ -2,8 +2,8 @@
 
 const PCOLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12"];
 const KIND_GLYPH = {
-  0: "", 1: "", 2: "\u{1F4B0}", 3: "\u{1F682}", 4: "\u26A1\u{1F4A7}", 5: "\u2753", 6: "\u{1F4E6}",
-  7: "\u23F8", 8: "\u{1F694}", 9: "\u27A1\uFE0F\u{1F694}",
+  0: "", 1: "", 2: "\u{1F4B0}", 3: "\u{1F682}", 4: "\u26A1", 5: "\u2753", 6: "\u{1F4E6}",
+  7: "\u23F8\uFE0F", 8: "\u{1F694}", 9: "\u{1F696}",
 };
 const GROUP_COLORS = ["#8b4513", "#a8d8ea", "#ff9fb2", "#f7941d", "#ff0000", "#b5d33d", "#2e8b57", "#1a1a1a"];
 const KIND_NAMES = { 0: "GO", 1: "Property", 2: "Tax", 3: "Railroad", 4: "Utility", 5: "Chance", 6: "Chest", 7: "Parking", 8: "Jail", 9: "To Jail" };
@@ -112,14 +112,15 @@ function buildBoard() {
       body = `<div class="tbody"><span class="tname">$${s.buy}</span><span class="tinfo">rent $${s.rent[0]}</span></div>`;
     } else if (s.kind === 3) {
       strip = `<div class="tstrip" style="background:#555"></div>`;
-      body = `<div class="tbody"><span class="tname">\u{1F682}</span><span class="tinfo">$${s.buy}</span></div>`;
+      body = `<div class="tbody"><span class="temoji">\u{1F682}</span><span class="tinfo">$${s.buy}</span></div>`;
     } else if (s.kind === 4) {
       strip = `<div class="tstrip" style="background:#7b5ea7"></div>`;
-      body = `<div class="tbody"><span class="tname">\u26A1</span><span class="tinfo">$${s.buy}</span></div>`;
+      body = `<div class="tbody"><span class="temoji">\u26A1</span><span class="tinfo">$${s.buy}</span></div>`;
     } else if (s.kind === 2) {
-      body = `<div class="tbody"><span class="tname">\u{1F4B0}</span><span class="tinfo">tax $${s.tax}</span></div>`;
+      body = `<div class="tbody"><span class="temoji">\u{1F4B0}</span><span class="tinfo">tax $${s.tax}</span></div>`;
     } else {
-      body = `<div class="tbody"><span class="tname">${KIND_GLYPH[s.kind] || ""}</span><span class="tinfo">${KIND_NAMES[s.kind]}</span></div>`;
+      const glyph = s.kind === 0 ? 'GO' : (KIND_GLYPH[s.kind] || KIND_NAMES[s.kind]);
+      body = `<div class="tbody"><span class="temoji${s.kind === 0 ? " goword" : ""}">${glyph}</span><span class="tinfo">${KIND_NAMES[s.kind]}</span></div>`;
     }
     t.innerHTML = num + strip + body;
     board.appendChild(t);
@@ -146,6 +147,9 @@ function renderTiles() {
     if (pawns.length) {
       e.innerHTML += `<div class="pawns">${pawns.map((p) =>
         `<span class="pawn" style="background:${PCOLORS[p.id % 4]}" title="${esc(p.name)}">${p.id}</span>`).join("")}</div>`;
+      t.style.zIndex = 6; // keep pieces above neighboring tiles
+    } else {
+      t.style.zIndex = "";
     }
     t.appendChild(e);
   }
