@@ -819,6 +819,9 @@ func (g *Game) AuctionBid(pid, amount int) error {
 	if amount < 0 {
 		return errors.New("bad amount")
 	}
+	if amount%auctionStep != 0 {
+		return fmt.Errorf("bids must be multiples of $%d", auctionStep)
+	}
 	minBid := a.Bid
 	if a.Bidder != -1 {
 		minBid = a.Bid + auctionStep // outbid by at least $10

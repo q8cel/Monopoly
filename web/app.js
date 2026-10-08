@@ -214,36 +214,39 @@ function renderActions() {
   a.appendChild(row);
 }
 
+let bidDraft = null; // {sq, amount} - survives re-renders
+
 function renderAuction() {
   const a = $("auctionPanel");
   a.innerHTML = "";
-  if (state.phase !== "auction" || !state.auction) return;
+  if (state.phase !== "auction" || !state.auction) { bidDraft = null; return; }
   const au = state.auction;
   const me = state.players[myId];
   if (me.bankrupt || me.left || me.id === au.trigger) return;
   const passed = au.passed.includes(myId);
   const minBid = au.bidder >= 0 ? au.bid + 10 : au.bid;
+  if (!bidDraft || bidDraft.sq !== au.sq) bidDraft = { sq: au.sq, amount: minBid };
+  bidDraft.amount = Math.max(bidDraft.amount, minBid);
+
   const row = document.createElement("div");
   row.className = "btnrow";
-  const input = document.createElement("input");
-  input.type = "number";
-  input.min = minBid;
-  input.step = 10;
-  input.value = minBid;
-  input.style.width = "70px";
-  row.appendChild(input);
-  const bid = document.createElement("button");
-  bid.className = "btn primary";
-  bid.textContent = "Bid";
-  bid.disabled = passed;
-  bid.onclick = () => send({ type: "auction_bid", amount: +input.value });
-  row.appendChild(bid);
-  const pass = document.createElement("button");
-  pass.className = "btn";
-  pass.textContent = "Pass";
-  pass.disabled = passed;
-  pass.onclick = () => send({ type: "auction_pass" });
-  row.appendChild(pass);
+  const btn = (label, cls, fn, disabled) => {
+    const b = document.createElement("button");
+    b.className = "btn " + (cls || "");
+    b.textContent = label;
+    b.disabled = !!disabled;
+    b.onclick = fn;
+    row.appendChild(b);
+    return b;
+  };
+  btn("\u221210", "", () => { bidDraft.amount -= 10; renderAuction(); }, passed || bidDraft.amount <= minBid);
+  const val = document.createElement("span");
+  val.textContent = "$" + bidDraft.amount;
+  val.style.cssText = "font-weight:700;min-width:4.5em;text-align:center;align-self:center;";
+  row.appendChild(val);
+  btn("+10", "", () => { bidDraft.amount += 10; renderAuction(); }, passed);
+  btn("Bid", "primary", () => send({ type: "auction_bid", amount: bidDraft.amount }), passed);
+  btn("Pass", "", () => send({ type: "auction_pass" }), passed);
   if (passed) {
     const s = document.createElement("span");
     s.textContent = "you passed";

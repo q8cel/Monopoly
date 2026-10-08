@@ -230,6 +230,9 @@ func TestAuctionRules(t *testing.T) {
 	if err := g.AuctionBid(2, base+5); err == nil {
 		t.Fatal("outbid must be at least $10")
 	}
+	if err := g.AuctionBid(2, base+15); err == nil {
+		t.Fatal("bid must be a multiple of $10")
+	}
 	if err := g.AuctionBid(2, base+10); err != nil {
 		t.Fatalf("valid outbid rejected: %v", err)
 	}
