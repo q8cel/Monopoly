@@ -10,7 +10,7 @@ body {
 
 /* ---------- lobby ---------- */
 #lobby {
-  min-height: 100svh; display: flex; flex-direction: column;
+  min-height: 100vh; min-height: 100svh; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 14px; padding: 20px;
 }
 #lobby h1 { font-family: "Bungee", "Rubik", cursive; font-size: 42px; letter-spacing: 4px; color: #ffd24a; }
@@ -170,7 +170,7 @@ body {
 }
 #modalBox {
   background: #262626; border: 1px solid #555; border-radius: 12px;
-  padding: 16px; width: min(94vw, 460px); max-height: 88svh; overflow-y: auto;
+  padding: 16px; width: min(94vw, 460px); max-height: 88vh; max-height: 88svh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 10px;
 }
 #modalBox h2 { font-size: 18px; color: #ffd24a; }
