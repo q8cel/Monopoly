@@ -129,6 +129,8 @@ func (h *Hub) handle(pid int, m *Msg) {
 		err = g.Start(pid)
 	case "new_game":
 		err = g.NewGame(pid)
+	case "lobby":
+		err = g.ResetToLobby()
 	case "roll":
 		err = g.Roll(pid)
 	case "end_turn":

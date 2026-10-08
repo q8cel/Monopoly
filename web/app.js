@@ -322,13 +322,12 @@ function showGameOver() {
     const ov = document.createElement("div");
     ov.id = "overOverlay";
     ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:40;display:flex;align-items:center;justify-content:center;";
-    ov.innerHTML = `<div id="overBox"><div class="winner"></div><button class="btn big primary" id="newGameBtn">New game</button></div>`;
+    ov.innerHTML = `<div id="overBox"><div class="winner"></div><button class="btn big primary" id="lobbyBtn">Lobby</button></div>`;
     document.body.appendChild(ov);
-    $("newGameBtn").onclick = () => send({ type: "new_game" });
+    $("lobbyBtn").onclick = () => send({ type: "lobby" });
   }
   $("overBox").querySelector(".winner").textContent =
     state.winner >= 0 ? `${state.players[state.winner].name} wins!` : "Game over";
-  $("newGameBtn").disabled = state.host !== myId;
 }
 function hideGameOver() {
   const ov = $("overOverlay");

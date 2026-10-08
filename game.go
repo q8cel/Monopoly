@@ -149,7 +149,13 @@ func (g *Game) nextSurviving(from int) int {
 func (g *Game) Join(name string) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.St.Phase != "lobby" {
+	switch g.St.Phase {
+	case "lobby":
+	case "over":
+		// a finished game is back in the waiting state; the previous
+		// round is discarded and the old players stay in the lobby
+		g.toLobbyLocked()
+	default:
 		return -1, errors.New("game already in progress")
 	}
 	for i := range g.St.Players {
@@ -172,6 +178,24 @@ func (g *Game) Join(name string) (int, error) {
 	}
 	g.log("%s joined.", name)
 	return pid, nil
+}
+
+// ResetToLobby discards the finished game and returns to the lobby with the
+// same players, so the host can start a new game and new players can join.
+func (g *Game) ResetToLobby() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "over" {
+		return errors.New("game is not over")
+	}
+	g.toLobbyLocked()
+	return nil
+}
+
+func (g *Game) toLobbyLocked() {
+	g.resetForNewGame()
+	g.St.Phase = "lobby"
+	g.log("Back to the lobby — start a new game when ready.")
 }
 
 func (g *Game) Start(pid int) error {

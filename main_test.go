@@ -248,3 +248,45 @@ func TestAuctionRules(t *testing.T) {
 	}
 	g.mu.Unlock()
 }
+
+func TestReplayAfterGameOver(t *testing.T) {
+	g := NewGame()
+	for _, n := range []string{"A", "B"} {
+		if _, err := g.Join(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// simulate a finished game
+	g.mu.Lock()
+	g.St.Phase = "over"
+	g.St.Winner = 0
+	g.St.Players[1].Bankrupt = true
+	g.mu.Unlock()
+
+	// new player joining after the game ends must work and reset to lobby
+	if _, err := g.Join("C"); err != nil {
+		t.Fatalf("join after game over must work: %v", err)
+	}
+	g.mu.Lock()
+	if g.St.Phase != "lobby" || len(g.St.Players) != 3 || g.St.Winner != -1 {
+		t.Fatalf("should be in lobby with 3 players, no winner: phase=%s n=%d winner=%d",
+			g.St.Phase, len(g.St.Players), g.St.Winner)
+	}
+	g.mu.Unlock()
+
+	if err := g.Start(0); err != nil {
+		t.Fatalf("start after replay reset: %v", err)
+	}
+	g.mu.Lock()
+	for _, p := range g.St.Players {
+		if p.Bankrupt || p.Cash != startCash || p.Pos != 0 {
+			t.Fatalf("player %d not reset: %+v", p.ID, p)
+		}
+	}
+	g.mu.Unlock()
+
+	// ResetToLobby is only valid from "over"
+	if err := g.ResetToLobby(); err == nil {
+		t.Fatal("ResetToLobby during an active game must fail")
+	}
+}
