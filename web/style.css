@@ -104,8 +104,6 @@ body {
 .tile .mort {
   position: absolute; top: 15%; right: 2px; font-size: .85em; font-weight: 700; color: #a00;
 }
-.tile.corner .tname { font-size: 1.15em; }
-
 /* ---------- center ---------- */
 #center {
   grid-area: 2 / 2 / 11 / 11;
