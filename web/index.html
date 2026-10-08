@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Monopoly</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="lobby">
+  <h1>MONOPOLY</h1>
+  <p class="sub">2&ndash;4 players &middot; share this URL</p>
+  <div id="lobbyForm">
+    <input id="nameInput" maxlength="12" placeholder="Your name" autocomplete="off">
+    <button id="joinBtn" class="btn big">Join game</button>
+  </div>
+  <div id="lobbyPlayers" class="hidden"></div>
+  <button id="startBtn" class="btn big primary hidden">Start game</button>
+  <div id="lobbyStatus" class="small"></div>
+</div>
+
+<div id="game" class="screen hidden">
+  <div id="boardWrap">
+    <div id="board">
+      <div id="center">
+        <div id="centerTitle">MONOPOLY</div>
+        <div id="turnInfo"></div>
+        <div id="actions"></div>
+        <div id="auctionPanel"></div>
+        <div id="dealsPanel"></div>
+        <div id="playerRow"></div>
+        <div id="log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="modal" class="hidden"><div id="modalBox"></div></div>
+<div id="toast" class="hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
