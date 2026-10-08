@@ -21,6 +21,12 @@ body {
   background: #1c1c1c; color: #fff; width: 200px;
 }
 #lobbyPlayers { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.rmBtn {
+  background: none; border: none; color: #b02a2a;
+  font-weight: 800; font-size: 1em; line-height: 1;
+  cursor: pointer; padding: 0 3px; vertical-align: middle;
+}
+.rmBtn:hover { color: #701515; }
 .lobbyPill {
   padding: 8px 14px; border-radius: 999px; background: #3a3a3a;
   display: flex; align-items: center; gap: 8px; font-size: 14px;

@@ -25,6 +25,7 @@ function connect() {
     const m = JSON.parse(e.data);
     if (m.type === "state") { state = m.state; render(); }
     else if (m.type === "joined") { myId = m.pid; }
+    else if (m.type === "removed") { toast("You were removed by the host"); myId = -1; state = null; showLobbyForm(); }
     else if (m.type === "error") { toast(m.message); }
   };
   ws.onclose = () => { setTimeout(connect, 1500); };
@@ -68,8 +69,9 @@ function showLobby() {
   const lp = $("lobbyPlayers");
   lp.classList.remove("hidden");
   lp.innerHTML = alive.map((p) =>
-    `<span class="lobbyPill"><span class="dot" style="background:${PCOLORS[p.id % 4]}"></span>${esc(p.name)}${p.id === state.host ? " (host)" : ""}</span>`
+    `<span class="lobbyPill"><span class="dot" style="background:${PCOLORS[p.id % 4]}"></span>${esc(p.name)}${p.id === state.host ? " (host)" : ""}${hostRemoveBtn(p)}</span>`
   ).join("");
+  bindRemoveBtns(lp);
   const canStart = alive.length >= 2;
   $("startBtn").classList.toggle("hidden", !canStart);
   $("startBtn").disabled = state.host !== myId;
@@ -303,12 +305,24 @@ function renderDeals() {
   }
 }
 
+function hostRemoveBtn(p) {
+  return state.host === myId && p.id !== myId
+    ? `<button class="rmBtn" data-pid="${p.id}" title="Remove player">\u2715</button>` : "";
+}
+function bindRemoveBtns(container) {
+  container.querySelectorAll(".rmBtn").forEach((b) => (b.onclick = (ev) => {
+    ev.stopPropagation();
+    if (confirm("Remove this player?")) send({ type: "remove", to: +b.dataset.pid });
+  }));
+}
+
 function renderPlayers() {
   const r = $("playerRow");
   r.innerHTML = state.players.filter((p) => p.name && !p.left).map((p) => {
     const cls = p.bankrupt ? "out" : (p.id === state.current && state.phase === "turn" ? "turn" : "");
-    return `<span class="pcard ${cls}"><span class="dot" style="background:${PCOLORS[p.id % 4]}"></span>${esc(p.name)} <b>$${p.cash}</b>${p.inJail ? " \u{1F694}" : ""}${p.cards ? ` \u{1F39F}x${p.cards}` : ""}</span>`;
+    return `<span class="pcard ${cls}"><span class="dot" style="background:${PCOLORS[p.id % 4]}"></span>${esc(p.name)} <b>$${p.cash}</b>${p.inJail ? " \u{1F694}" : ""}${p.cards ? ` \u{1F39F}x${p.cards}` : ""}${hostRemoveBtn(p)}</span>`;
   }).join("");
+  bindRemoveBtns(r);
 }
 
 function renderLog() {

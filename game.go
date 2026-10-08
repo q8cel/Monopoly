@@ -260,22 +260,64 @@ func (g *Game) resetForNewGame() {
 func (g *Game) Disconnect(pid int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if pid < 0 || pid >= len(g.St.Players) {
+	g.removeLocked(pid)
+}
+
+// RemovePlayer kicks a player out of the lobby or the running game.
+// Only the host may do it, and not to themselves.
+func (g *Game) RemovePlayer(by, pid int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if by != g.St.Host {
+		return errors.New("only the host can remove players")
+	}
+	if pid == by {
+		return errors.New("cannot remove yourself")
+	}
+	if pid < 0 || pid >= len(g.St.Players) || g.St.Players[pid].Left {
+		return errors.New("no such player")
+	}
+	g.removeLocked(pid)
+	return nil
+}
+
+// removeLocked performs the actual removal (player must not be Left already).
+func (g *Game) removeLocked(pid int) {
+	if pid < 0 || pid >= len(g.St.Players) || g.St.Players[pid].Left {
 		return
 	}
 	if g.St.Phase == "lobby" {
+		g.log("%s was removed from the lobby.", g.St.Players[pid].Name)
 		g.St.Players[pid].Left = true
 		g.St.Players[pid].Name = ""
-		g.log("A player left the lobby.")
+	} else {
+		p := &g.St.Players[pid]
+		if !p.Bankrupt {
+			g.log("%s was removed and goes bankrupt.", p.Name)
+			g.bankruptTo(pid, -1)
+		}
+		if g.St.Phase == "turn" && g.St.Current == pid {
+			g.advanceAfterLoss(pid)
+		}
+	}
+	g.reassignHostLocked()
+}
+
+// reassignHostLocked makes sure the host is still a present player, so
+// someone can always start the next game or manage the lobby.
+func (g *Game) reassignHostLocked() {
+	if g.St.Host >= 0 && g.St.Host < len(g.St.Players) && !g.St.Players[g.St.Host].Left {
 		return
 	}
-	p := &g.St.Players[pid]
-	if !p.Bankrupt {
-		g.log("%s disconnected and goes bankrupt.", p.Name)
-		g.bankruptTo(pid, -1)
+	g.St.Host = -1
+	for i := range g.St.Players {
+		if !g.St.Players[i].Left {
+			g.St.Host = i
+			break
+		}
 	}
-	if g.St.Phase == "turn" && g.St.Current == pid {
-		g.advanceAfterLoss(pid)
+	if g.St.Host >= 0 {
+		g.log("%s is the new host.", g.St.Players[g.St.Host].Name)
 	}
 }
 

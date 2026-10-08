@@ -290,3 +290,37 @@ func TestReplayAfterGameOver(t *testing.T) {
 		t.Fatal("ResetToLobby during an active game must fail")
 	}
 }
+
+func TestRemovePlayer(t *testing.T) {
+	g := NewGame()
+	for _, n := range []string{"A", "B", "C"} {
+		if _, err := g.Join(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := g.RemovePlayer(1, 2); err == nil {
+		t.Fatal("non-host must not remove")
+	}
+	if err := g.RemovePlayer(0, 0); err == nil {
+		t.Fatal("cannot remove self")
+	}
+	if err := g.RemovePlayer(0, 2); err != nil {
+		t.Fatalf("host removing a lobby player: %v", err)
+	}
+	g.mu.Lock()
+	if !g.St.Players[2].Left || g.St.Players[2].Name != "" {
+		t.Fatalf("removed player should be cleared from lobby: %+v", g.St.Players[2])
+	}
+	if g.St.Host != 0 {
+		t.Fatal("host should be unchanged")
+	}
+	g.mu.Unlock()
+
+	// host disconnecting -> host role moves to the first remaining player
+	g.Disconnect(0)
+	g.mu.Lock()
+	if g.St.Host != 1 {
+		t.Fatalf("host should move to player 1, got %d", g.St.Host)
+	}
+	g.mu.Unlock()
+}

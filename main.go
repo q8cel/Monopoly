@@ -7,8 +7,17 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
+)
+
+// Keep-alive: if a connection sends no data and answers no pings for
+// pongWait, it is considered dead (sleeping tab, dropped network, force-
+// quit browser) and closed, which frees the player's slot.
+const (
+	pingPeriod = 30 * time.Second
+	pongWait   = 75 * time.Second
 )
 
 // Msg is a client -> server action message.
@@ -75,6 +84,34 @@ func (h *Hub) handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Println("upgrade:", err)
 		return
 	}
+
+	// keep-alive: ping every 30s; browser answers pings automatically,
+	// a dead connection produces no pongs and times out the read
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+	pingStop := make(chan struct{})
+	defer close(pingStop)
+	go func() {
+		t := time.NewTicker(pingPeriod)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				h.mu.Lock()
+				werr := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second))
+				h.mu.Unlock()
+				if werr != nil {
+					conn.Close()
+					return
+				}
+			case <-pingStop:
+				return
+			}
+		}
+	}()
 	var join Msg
 	if err := conn.ReadJSON(&join); err != nil {
 		conn.Close()
@@ -110,8 +147,9 @@ func (h *Hub) handleWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		var m Msg
 		if err := conn.ReadJSON(&m); err != nil {
-			return
+			return // read timeout (dead connection) or close -> Disconnect via defer
 		}
+		conn.SetReadDeadline(time.Now().Add(pongWait)) // any message proves the connection is alive
 		h.handle(pid, &m)
 	}
 }
@@ -131,6 +169,16 @@ func (h *Hub) handle(pid int, m *Msg) {
 		err = g.NewGame(pid)
 	case "lobby":
 		err = g.ResetToLobby()
+	case "remove":
+		if err = g.RemovePlayer(pid, m.To); err == nil {
+			// tell the removed player and drop their connection
+			h.mu.Lock()
+			if c, ok := h.cons[m.To]; ok {
+				h.sendRaw(c, outMsg{Type: "removed"})
+				c.Close()
+			}
+			h.mu.Unlock()
+		}
 	case "roll":
 		err = g.Roll(pid)
 	case "end_turn":
