@@ -7,6 +7,8 @@ const KIND_GLYPH = {
 };
 const GROUP_COLORS = ["#8b4513", "#a8d8ea", "#ff9fb2", "#f7941d", "#ff0000", "#b5d33d", "#2e8b57", "#1a1a1a"];
 const KIND_NAMES = { 0: "GO", 1: "Property", 2: "Tax", 3: "Railroad", 4: "Utility", 5: "Chance", 6: "Chest", 7: "Parking", 8: "Jail", 9: "To Jail" };
+// strip colors: identical for every square of the same kind
+const KIND_STRIP = { 0: "#1f8f3b", 2: "#b8860b", 3: "#555555", 4: "#7b5ea7", 5: "#e8890c", 6: "#0e8a7d", 7: "#5b7c99", 8: "#a0522d", 9: "#a02020" };
 
 let ws = null;
 let myId = -1;
@@ -106,24 +108,23 @@ function buildBoard() {
     t.style.gridColumn = col;
     t.dataset.sq = sq;
 
-    let strip = "";
-    let body;
-    const num = `<span class="tnum">${sq}</span>`;
+    // every tile has a color strip that carries its label; the body holds
+    // only the big emoji (or a group tint for properties)
+    const stripColor = s.kind === 1 ? GROUP_COLORS[s.group] : KIND_STRIP[s.kind];
+    let stripLabel, body;
     if (s.kind === 1) {
-      strip = `<div class="tstrip" style="background:${GROUP_COLORS[s.group]}"></div>`;
-      body = `<div class="tbody"><span class="tname">$${s.buy}</span><span class="tinfo">rent $${s.rent[0]}</span></div>`;
-    } else if (s.kind === 3) {
-      strip = `<div class="tstrip" style="background:#555"></div>`;
-      body = `<div class="tbody"><span class="temoji">\u{1F682}</span><span class="tinfo">$${s.buy}</span></div>`;
-    } else if (s.kind === 4) {
-      strip = `<div class="tstrip" style="background:#7b5ea7"></div>`;
-      body = `<div class="tbody"><span class="temoji">\u26A1</span><span class="tinfo">$${s.buy}</span></div>`;
-    } else if (s.kind === 2) {
-      body = `<div class="tbody"><span class="temoji">\u{1F4B0}</span><span class="tinfo">tax $${s.tax}</span></div>`;
+      stripLabel = `$${s.buy}<br><small>rent $${s.rent[0]}</small>`;
+      body = `<div class="tbody" style="background:${GROUP_COLORS[s.group]}22"></div>`;
     } else {
-      const glyph = s.kind === 0 ? 'GO' : (KIND_GLYPH[s.kind] || KIND_NAMES[s.kind]);
-      body = `<div class="tbody"><span class="temoji${s.kind === 0 ? " goword" : ""}">${glyph}</span><span class="tinfo">${KIND_NAMES[s.kind]}</span></div>`;
+      stripLabel = s.kind === 2 ? `Tax $${s.tax}`
+        : s.kind === 3 ? `Railroad $${s.buy}`
+        : s.kind === 4 ? `Utility $${s.buy}`
+        : KIND_NAMES[s.kind];
+      const glyph = KIND_GLYPH[s.kind] || "";
+      body = glyph ? `<div class="tbody"><span class="temoji">${glyph}</span></div>` : `<div class="tbody"></div>`;
     }
+    const strip = `<div class="tstrip" style="background:${stripColor}"><span class="tlabel">${stripLabel}</span></div>`;
+    const num = `<span class="tnum">${sq}</span>`;
     t.innerHTML = num + strip + body;
     board.appendChild(t);
   }
