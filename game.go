@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -8,254 +9,261 @@ import (
 	"time"
 )
 
+// ---- constants ----
 const (
-	startCash  = 1500
-	houseCost  = 100
-	goPayout   = 200
-	maxPlayers = 4
+	maxActors     = 6
+	actorCost     = 300
+	startTreasury = 1500
+	actorFunds    = 200
+	jailFine      = 50
+	jailMaxTurns  = 3 // auto release after this many jailed turns
+	bankReward    = 100
+	baseReward    = 100 // landing on your own base
+	baseToll      = 50  // landing on an enemy base
+	occupyFee     = 25  // per enemy unit on the landed cell (+ half base rent on properties)
+	maxOccupy     = 3   // max enemy units charged per landing
+	upkeepPerUnit = 10  // per living unit, paid to the bank at the start of each turn
+	maxHouses     = 4
+	houseCost     = 50
+	houseSell     = 25
+	auctionStep   = 10
 )
 
-// ---------- state ----------
+// ---- actors (units) ----
+
+type Actor struct {
+	ID        int  `json:"id"`
+	Owner     int  `json:"owner"`
+	X         int  `json:"x"`
+	Y         int  `json:"y"`
+	Cash      int  `json:"cash"`
+	Jailed    bool `json:"jailed"`
+	JailTurns int  `json:"jailedTurns"`
+	Alive     bool `json:"alive"`
+}
+
+// ---- players ----
 
 type Player struct {
-	ID        int    `json:"id"`
-	Name      string `json:"name"`
-	Cash      int    `json:"cash"`
-	Pos       int    `json:"pos"`
-	InJail    bool   `json:"inJail"`
-	JailTurns int    `json:"jailTurns"`
-	Cards     int    `json:"cards"` // get out of jail free
-	Bankrupt  bool   `json:"bankrupt"`
-	Left      bool   `json:"left"`
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
+	Cash     int    `json:"cash"` // treasury
+	Base     int    `json:"base"`
+	Bankrupt bool   `json:"bankrupt"`
+	Left     bool   `json:"left"`
 }
 
-type Prop struct {
-	Owner     int  `json:"owner"` // -1 = unowned
-	Houses    int  `json:"houses"`
-	Mortgaged bool `json:"mortgaged"`
-}
+// ---- deals ----
 
 type Asset struct {
 	Cash  int   `json:"cash"`
 	Props []int `json:"props"`
-	Cards int   `json:"cards"`
 }
 
 type Deal struct {
-	ID      int   `json:"id"`
-	From    int   `json:"from"`
-	To      int   `json:"to"`
-	Offer   Asset `json:"offer"` // From gives Offer, receives Request
-	Request Asset `json:"request"`
+	ID     int    `json:"id"`
+	From   int    `json:"from"`
+	To     int    `json:"to"`
+	Give   Asset  `json:"give"` // From -> To
+	Want   Asset  `json:"want"` // To -> From
+	Status string `json:"status"`
 }
 
+// ---- phases ----
+
 type BuyOffer struct {
-	Player int `json:"player"`
-	SQ     int `json:"sq"`
-	Price  int `json:"price"`
+	Actor int `json:"actor"`
+	Cell  int `json:"cell"`
 }
 
 type Auction struct {
-	SQ      int   `json:"sq"`
-	Bid     int   `json:"bid"`
-	Bidder  int   `json:"bidder"` // -1 = none yet
-	Trigger int   `json:"trigger"`
-	Passed  []int `json:"passed"`
+	Cell   int   `json:"cell"`
+	Bid    int   `json:"bid"`
+	Bidder int   `json:"bidder"` // -1 = nobody yet
+	Passed []int `json:"passed"`
+	From   int   `json:"-"` // the player whose turn the auction interrupts
 }
 
 type State struct {
-	Phase      string     `json:"phase"` // lobby | turn | auction | over
-	Players    []Player   `json:"players"`
-	Current    int        `json:"current"`
-	Dice       [2]int     `json:"dice"`
-	Rolled     bool       `json:"rolled"`
-	LastDouble bool       `json:"lastDouble"`
-	Doubles    int        `json:"doubles"`
-	Props      []Prop     `json:"props"`
-	Board      [40]Square `json:"board"`
-	BuyOffer   *BuyOffer  `json:"buyOffer"`
-	Auction    *Auction   `json:"auction"`
-	Deals      []Deal     `json:"deals"`
-	Log        []string   `json:"log"`
-	Winner     int        `json:"winner"`
-	Host       int        `json:"host"`
-	DeckLeft   [2]int     `json:"deckLeft"`
-}
-
-type card struct {
-	text  string
-	apply func(g *Game, p *Player)
+	Phase    string           `json:"phase"` // lobby | roll | move | offer | auction | over
+	Host     int              `json:"host"`
+	Players  [4]Player        `json:"players"`
+	Actors   []Actor          `json:"actors"`
+	Cells    [CellCount]Cell  `json:"cells"`
+	Current  int              `json:"current"`
+	Dice     [2]int           `json:"dice"`
+	Offer    *BuyOffer        `json:"offer,omitempty"`
+	Auction  *Auction         `json:"auction,omitempty"`
+	Deals    []Deal           `json:"deals"`
+	Log      []string         `json:"log"`
+	Winner   int              `json:"winner"`
+	NextID   int              `json:"-"`
+	NextDeal int              `json:"-"`
 }
 
 type Game struct {
-	mu        sync.Mutex
-	St        *State
-	rng       *rand.Rand
-	chance    []card
-	chest     []card
-	nextDeal  int
-	Broadcast func()
+	mu  sync.Mutex
+	St  *State
+	rng *rand.Rand
 }
 
 func NewGame() *Game {
 	g := &Game{rng: rand.New(rand.NewSource(time.Now().UnixNano()))}
-	g.St = &State{
-		Phase:   "lobby",
-		Props:   make([]Prop, 40),
-		Current: -1,
-		Winner:  -1,
-		Host:    -1,
-	}
-	for i := range g.St.Props {
-		g.St.Props[i].Owner = -1
-	}
-	g.St.Board = board
-	g.chance = g.buildChanceDeck()
-	g.chest = g.buildChestDeck()
-	g.log("Welcome to Monopoly.")
+	g.resetState()
+	g.St.Phase = "lobby"
 	return g
 }
 
-func (g *Game) log(format string, a ...any) {
-	g.St.Log = append(g.St.Log, fmt.Sprintf(format, a...))
-	if len(g.St.Log) > 60 {
-		g.St.Log = g.St.Log[len(g.St.Log)-60:]
+func (g *Game) resetState() {
+	g.St = &State{
+		Host:    -1,
+		Current: -1,
+		Winner:  -1,
+		Cells:   NewCells(),
+	}
+	for i := range g.St.Players {
+		g.St.Players[i].ID = i
+		g.St.Players[i].Base = slotBase[i]
 	}
 }
 
-func (g *Game) alive() int {
-	n := 0
-	for _, p := range g.St.Players {
-		if !p.Bankrupt && !p.Left {
-			n++
-		}
-	}
-	return n
+// Snapshot returns a JSON copy of the state (safe to send on sockets).
+func (g *Game) Snapshot() []byte {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	b, _ := json.Marshal(g.St)
+	return b
 }
 
-func (g *Game) nextSurviving(from int) int {
-	n := len(g.St.Players)
-	for i := 1; i <= n; i++ {
-		p := (from + i) % n
-		if !g.St.Players[p].Bankrupt && !g.St.Players[p].Left {
-			return p
-		}
+func (g *Game) log(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	g.St.Log = append(g.St.Log, msg)
+	if len(g.St.Log) > 120 {
+		g.St.Log = g.St.Log[len(g.St.Log)-120:]
 	}
-	return -1
 }
 
-// ---------- lobby ----------
+// ---- lobby / lifecycle ----
 
 func (g *Game) Join(name string) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	switch g.St.Phase {
-	case "lobby":
-	case "over":
-		// a finished game is back in the waiting state; the previous
-		// round is discarded and the old players stay in the lobby
+	if g.St.Phase == "over" {
 		g.toLobbyLocked()
-	default:
+	}
+	if g.St.Phase != "lobby" {
 		return -1, errors.New("game already in progress")
 	}
+	slot := -1
 	for i := range g.St.Players {
-		if g.St.Players[i].Left {
-			g.St.Players[i] = Player{ID: i, Name: name, Cash: startCash}
-			if g.St.Host == -1 || g.St.Players[g.St.Host].Left {
-				g.St.Host = i
-			}
-			g.log("%s joined.", name)
-			return i, nil
+		if g.St.Players[i].Left || g.St.Players[i].Name == "" {
+			slot = i
+			break
 		}
 	}
-	if len(g.St.Players) >= maxPlayers {
-		return -1, errors.New("game is full (max 4 players)")
+	if slot == -1 {
+		return -1, errors.New("lobby is full")
 	}
-	pid := len(g.St.Players)
-	g.St.Players = append(g.St.Players, Player{ID: pid, Name: name, Cash: startCash})
+	if name == "" {
+		name = fmt.Sprintf("Player %d", slot+1)
+	}
+	g.St.Players[slot].Name = name
+	g.St.Players[slot].Left = false
 	if g.St.Host == -1 {
-		g.St.Host = pid
+		g.St.Host = slot
 	}
-	g.log("%s joined.", name)
-	return pid, nil
+	g.log("%s joined the lobby", name)
+	return slot, nil
 }
 
-// ResetToLobby discards the finished game and returns to the lobby with the
-// same players, so the host can start a new game and new players can join.
+func (g *Game) Start() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "lobby" {
+		return errors.New("game is not in the lobby")
+	}
+	if g.St.Host < 0 {
+		return errors.New("no host yet")
+	}
+	n := 0
+	for _, p := range g.St.Players {
+		if !p.Left && p.Name != "" {
+			n++
+		}
+	}
+	if n < 2 {
+		return errors.New("need at least 2 players")
+	}
+	g.St.Cells = NewCells()
+	g.St.Actors = nil
+	g.St.NextID = 0
+	g.St.Deals = nil
+	g.St.Offer = nil
+	g.St.Auction = nil
+	g.St.Winner = -1
+	g.St.Log = nil
+	first := -1
+	for i := range g.St.Players {
+		p := &g.St.Players[i]
+		p.Bankrupt = false
+		p.Base = slotBase[i]
+		if p.Left || p.Name == "" {
+			continue
+		}
+		p.Cash = startTreasury
+		if first == -1 {
+			first = i
+		}
+		for k := 0; k < 3; k++ {
+			g.St.Actors = append(g.St.Actors, Actor{
+				ID:    g.St.NextID,
+				Owner: i,
+				X:     p.Base % Grid,
+				Y:     p.Base / Grid,
+				Cash:  actorFunds,
+				Alive: true,
+			})
+			g.St.NextID++
+		}
+	}
+	g.St.Current = first
+	g.St.Phase = "roll"
+	g.log("The battle begins! %d armies deploy.", n)
+	return nil
+}
+
 func (g *Game) ResetToLobby() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.St.Phase != "over" {
-		return errors.New("game is not over")
+		return errors.New("game is still running")
 	}
 	g.toLobbyLocked()
 	return nil
 }
 
 func (g *Game) toLobbyLocked() {
-	g.resetForNewGame()
-	g.St.Phase = "lobby"
-	g.log("Back to the lobby — start a new game when ready.")
-}
-
-func (g *Game) Start(pid int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "lobby" {
-		return errors.New("not in lobby")
-	}
-	if g.alive() < 2 {
-		return errors.New("need at least 2 players to start")
-	}
-	g.resetForNewGame()
-	g.St.Phase = "turn"
-	g.St.Current = g.nextSurviving(-1)
-	g.log("Game started! %s goes first.", g.St.Players[g.St.Current].Name)
-	return nil
-}
-
-func (g *Game) NewGame(pid int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase == "lobby" {
-		return errors.New("game not started")
-	}
-	if pid != g.St.Host {
-		return errors.New("only the host can start a new game")
-	}
-	g.resetForNewGame()
-	g.St.Phase = "turn"
-	g.St.Current = g.nextSurviving(-1)
-	g.log("New game started! %s goes first.", g.St.Players[g.St.Current].Name)
-	return nil
-}
-
-func (g *Game) resetForNewGame() {
 	for i := range g.St.Players {
 		p := &g.St.Players[i]
-		if p.Left {
-			continue
+		if !p.Left {
+			p.Cash = 0
+			p.Bankrupt = false
 		}
-		p.Cash = startCash
-		p.Pos = 0
-		p.InJail = false
-		p.JailTurns = 0
-		p.Cards = 0
-		p.Bankrupt = false
+		p.Name = ""
 	}
-	for i := range g.St.Props {
-		g.St.Props[i] = Prop{Owner: -1}
-	}
-	g.St.Deals = nil
-	g.St.BuyOffer = nil
+	g.St.Cells = NewCells()
+	g.St.Actors = nil
+	g.St.Offer = nil
 	g.St.Auction = nil
+	g.St.Deals = nil
 	g.St.Winner = -1
-	g.St.Dice = [2]int{}
-	g.chance = g.buildChanceDeck()
-	g.chest = g.buildChestDeck()
-	g.St.DeckLeft = [2]int{len(g.chance), len(g.chest)}
-	g.St.Log = g.St.Log[:0]
+	g.St.Current = -1
+	g.St.Host = -1
+	g.St.Log = nil
+	g.St.Phase = "lobby"
 }
+
+// ---- connectivity / host removal ----
 
 func (g *Game) Disconnect(pid int) {
 	g.mu.Lock()
@@ -263,8 +271,6 @@ func (g *Game) Disconnect(pid int) {
 	g.removeLocked(pid)
 }
 
-// RemovePlayer kicks a player out of the lobby or the running game.
-// Only the host may do it, and not to themselves.
 func (g *Game) RemovePlayer(by, pid int) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -281,7 +287,6 @@ func (g *Game) RemovePlayer(by, pid int) error {
 	return nil
 }
 
-// removeLocked performs the actual removal (player must not be Left already).
 func (g *Game) removeLocked(pid int) {
 	if pid < 0 || pid >= len(g.St.Players) || g.St.Players[pid].Left {
 		return
@@ -293,1066 +298,942 @@ func (g *Game) removeLocked(pid int) {
 	} else {
 		p := &g.St.Players[pid]
 		if !p.Bankrupt {
-			g.log("%s was removed and goes bankrupt.", p.Name)
+			g.log("%s left the battlefield and is eliminated.", p.Name)
 			g.bankruptTo(pid, -1)
-		}
-		if g.St.Phase == "turn" && g.St.Current == pid {
-			g.advanceAfterLoss(pid)
 		}
 	}
 	g.reassignHostLocked()
 }
 
-// reassignHostLocked makes sure the host is still a present player, so
-// someone can always start the next game or manage the lobby.
 func (g *Game) reassignHostLocked() {
 	if g.St.Host >= 0 && g.St.Host < len(g.St.Players) && !g.St.Players[g.St.Host].Left {
 		return
 	}
 	g.St.Host = -1
 	for i := range g.St.Players {
-		if !g.St.Players[i].Left {
+		if !g.St.Players[i].Left && g.St.Players[i].Name != "" {
 			g.St.Host = i
-			break
-		}
-	}
-	if g.St.Host >= 0 {
-		g.log("%s is the new host.", g.St.Players[g.St.Host].Name)
-	}
-}
-
-// ---------- turn flow ----------
-
-func (g *Game) rollCheck(pid int) error {
-	if g.St.Phase != "turn" || g.St.Current != pid {
-		return errors.New("not your turn")
-	}
-	if g.St.BuyOffer != nil && g.St.BuyOffer.Player == pid {
-		return errors.New("buy or decline the property first")
-	}
-	return nil
-}
-
-func (g *Game) Roll(pid int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if err := g.rollCheck(pid); err != nil {
-		return err
-	}
-	p := &g.St.Players[pid]
-	d1 := 1 + g.rng.Intn(6)
-	d2 := 1 + g.rng.Intn(6)
-	g.St.Dice = [2]int{d1, d2}
-	g.St.Rolled = true
-	g.St.LastDouble = d1 == d2
-	total := d1 + d2
-	g.log("%s rolled %d + %d.", p.Name, d1, d2)
-
-	if p.InJail {
-		if g.St.LastDouble {
-			p.InJail = false
-			p.JailTurns = 0
-			g.log("%s rolls doubles and gets out of jail.", p.Name)
-			g.moveAndResolve(p, total)
-		} else {
-			p.JailTurns++
-			if p.JailTurns >= 3 {
-				p.InJail = false
-				p.JailTurns = 0
-				g.chargeBank(p, 50)
-				if !p.Bankrupt {
-					g.log("%s pays $50 fine and moves.", p.Name)
-					g.moveAndResolve(p, total)
-				}
-			} else {
-				g.log("%s fails to get out of jail (attempt %d/3).", p.Name, p.JailTurns)
-			}
-		}
-	} else {
-		g.moveAndResolve(p, total)
-		if !p.Bankrupt && g.St.LastDouble && g.St.BuyOffer == nil {
-			g.St.Doubles++
-			if g.St.Doubles >= 3 {
-				g.log("%s rolls doubles three times in a row and goes to jail.", p.Name)
-				g.toJail(p)
-				g.St.LastDouble = false
-			} else {
-				g.log("%s rolls doubles and rolls again.", p.Name)
-				g.St.Rolled = false
-				return nil // second roll of the same turn
-			}
-		}
-	}
-
-	// end of turn (auto): unless the player just went bankrupt (handled in
-	// bankruptTo) or must still answer a pending buy offer.
-	if p.Bankrupt {
-		return nil
-	}
-	if g.St.BuyOffer != nil && g.St.BuyOffer.Player == pid {
-		return nil
-	}
-	g.endTurnNow(pid)
-	return nil
-}
-
-func (g *Game) EndTurn(pid int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "turn" || g.St.Current != pid {
-		return errors.New("not your turn")
-	}
-	if g.St.BuyOffer != nil && g.St.BuyOffer.Player == pid {
-		return errors.New("buy or decline the property first")
-	}
-	g.St.BuyOffer = nil
-	g.St.Current = g.nextSurviving(pid)
-	if g.St.Current == -1 {
-		g.endGame()
-		return nil
-	}
-	g.resetTurnState()
-	return nil
-}
-
-func (g *Game) endTurnNow(loser int) {
-	// called with lock held during the "turn" phase
-	if g.St.Phase != "turn" {
-		return // e.g. an auction is in progress; it advances the turn itself
-	}
-	if g.alive() <= 1 {
-		g.endGame()
-		return
-	}
-	g.St.Current = g.nextSurviving(loser)
-	g.resetTurnState()
-}
-
-func (g *Game) resetTurnState() {
-	g.St.Dice = [2]int{}
-	g.St.Rolled = false
-	g.St.LastDouble = false
-	g.St.Doubles = 0
-	g.St.BuyOffer = nil
-}
-
-func (g *Game) advanceAfterLoss(loser int) {
-	// called with lock held; loser just went bankrupt
-	if g.alive() <= 1 {
-		g.endGame()
-		return
-	}
-	if g.St.Phase == "turn" {
-		g.endTurnNow(loser)
-	}
-}
-
-func (g *Game) endGame() {
-	w := -1
-	for i := range g.St.Players {
-		if !g.St.Players[i].Bankrupt && !g.St.Players[i].Left {
-			w = i
-			break
-		}
-	}
-	g.St.Winner = w
-	g.St.Phase = "over"
-	g.St.Current = -1
-	if w >= 0 {
-		g.log("%s wins the game!", g.St.Players[w].Name)
-	} else {
-		g.log("Game over.")
-	}
-}
-
-// ---------- movement & landing ----------
-
-func (g *Game) moveAndResolve(p *Player, dist int) {
-	start := p.Pos
-	p.Pos = (start + dist) % 40
-	if start != 0 && start+dist >= 40 {
-		p.Cash += goPayout
-		g.log("%s collects $%d for passing GO.", p.Name, goPayout)
-	}
-	g.resolveLanding(p)
-}
-
-func (g *Game) resolveLanding(p *Player) {
-	sq := p.Pos
-	s := g.St.Board[sq]
-	switch s.Kind {
-	case KGo, KParking, KJail:
-		g.log("%s lands on square %d.", p.Name, sq)
-	case KGoToJail:
-		g.log("%s is sent to jail.", p.Name)
-		g.toJail(p)
-	case KTax:
-		g.log("%s pays $%d tax.", p.Name, s.Tax)
-		g.chargeBank(p, s.Tax)
-	case KProperty, KRailroad, KUtility:
-		pr := &g.St.Props[sq]
-		if pr.Owner == -1 {
-			if p.Cash >= s.Buy {
-				g.St.BuyOffer = &BuyOffer{Player: p.ID, SQ: sq, Price: s.Buy}
-				g.log("%s lands on unowned square %d. Buy for $%d?", p.Name, sq, s.Buy)
-			} else {
-				g.log("%s cannot afford square %d. Auction starts.", p.Name, sq)
-				g.startAuction(sq, p.ID)
-			}
-		} else if pr.Owner != p.ID && !pr.Mortgaged {
-			rent := g.rentAmount(sq)
-			g.log("%s must pay $%d rent to %s.", p.Name, rent, g.St.Players[pr.Owner].Name)
-			if p.Cash >= rent {
-				p.Cash -= rent
-				g.St.Players[pr.Owner].Cash += rent
-			} else {
-				g.log("%s cannot pay rent and goes bankrupt!", p.Name)
-				g.bankruptTo(p.ID, pr.Owner)
-			}
-		}
-	case KChance:
-		g.applyCard(g.draw("Chance"), p)
-	case KChest:
-		g.applyCard(g.draw("Chest"), p)
-	}
-}
-
-func (g *Game) toJail(p *Player) {
-	p.Pos = 10
-	p.InJail = true
-	p.JailTurns = 0
-}
-
-func (g *Game) rentAmount(sq int) int {
-	s := g.St.Board[sq]
-	pr := &g.St.Props[sq]
-	switch s.Kind {
-	case KProperty:
-		r := s.Rent[pr.Houses]
-		if pr.Houses == 0 && g.ownsGroup(pr.Owner, s.Group) {
-			r *= 2
-		}
-		return r
-	case KRailroad:
-		n := 0
-		for i := 0; i < 40; i++ {
-			if g.St.Board[i].Kind == KRailroad && g.St.Props[i].Owner == pr.Owner {
-				n++
-			}
-		}
-		return 25 << (n - 1)
-	case KUtility:
-		n := 0
-		for i := 0; i < 40; i++ {
-			if g.St.Board[i].Kind == KUtility && g.St.Props[i].Owner == pr.Owner {
-				n++
-			}
-		}
-		mult := 4
-		if n == 2 {
-			mult = 10
-		}
-		dice := g.St.Dice[0] + g.St.Dice[1]
-		if dice == 0 {
-			dice = 7
-		}
-		return mult * dice
-	}
-	return 0
-}
-
-func (g *Game) ownsGroup(pi, grp int) bool {
-	for _, sq := range groups[grp] {
-		if g.St.Props[sq].Owner != pi {
-			return false
-		}
-	}
-	return true
-}
-
-func (g *Game) chargeBank(p *Player, amount int) {
-	p.Cash -= amount
-	if p.Cash < 0 {
-		g.log("%s cannot pay the bank and goes bankrupt!", p.Name)
-		g.bankruptTo(p.ID, -1)
-	}
-}
-
-// ---------- money / bankruptcy ----------
-
-// bankruptTo transfers p's assets to creditor (player idx) or the bank (-1).
-func (g *Game) bankruptTo(pi, creditor int) {
-	p := &g.St.Players[pi]
-	p.Bankrupt = true
-	if creditor >= 0 && creditor < len(g.St.Players) {
-		c := &g.St.Players[creditor]
-		c.Cash += p.Cash
-		c.Cards += p.Cards
-		for i := range g.St.Props {
-			if g.St.Props[i].Owner == pi {
-				g.St.Props[i].Owner = creditor
-			}
-		}
-		g.log("Assets of %s go to %s.", p.Name, c.Name)
-	} else {
-		for i := range g.St.Props {
-			if g.St.Props[i].Owner == pi {
-				g.St.Props[i].Owner = -1
-				g.St.Props[i].Houses = 0
-			}
-		}
-		g.log("Assets of %s go to the bank.", p.Name)
-	}
-	// re-evaluate a running auction (bidder may have gone bankrupt)
-	if g.St.Auction != nil {
-		g.finishAuctionIfDone()
-	}
-	// cancel deals involving the bankrupt player
-	g.St.Deals = removeDealsWith(g.St.Deals, pi)
-	p.Cash = 0
-	p.Cards = 0
-	p.InJail = false
-	// the loser's turn (if any) must advance, or the game must end
-	g.advanceAfterLoss(pi)
-}
-
-func removeDealsWith(deals []Deal, pid int) []Deal {
-	out := deals[:0]
-	for _, d := range deals {
-		if d.From != pid && d.To != pid {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// ---------- turn actions: buy, build, mortgage ----------
-
-func (g *Game) Buy(pid int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	bo := g.St.BuyOffer
-	if bo == nil || bo.Player != pid {
-		return errors.New("no purchase offer for you")
-	}
-	p := &g.St.Players[pid]
-	if p.Cash < bo.Price {
-		return errors.New("not enough cash")
-	}
-	p.Cash -= bo.Price
-	g.St.Props[bo.SQ].Owner = pid
-	g.log("%s buys square %d for $%d.", p.Name, bo.SQ, bo.Price)
-	g.St.BuyOffer = nil
-	g.endTurnNow(pid)
-	return nil
-}
-
-func (g *Game) Decline(pid int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	bo := g.St.BuyOffer
-	if bo == nil || bo.Player != pid {
-		return errors.New("no purchase offer for you")
-	}
-	g.log("%s declines to buy square %d. Auction starts.", g.St.Players[pid].Name, bo.SQ)
-	g.St.BuyOffer = nil
-	g.startAuction(bo.SQ, pid)
-	return nil
-}
-
-func (g *Game) Build(pid, sq int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "turn" || g.St.Current != pid {
-		return errors.New("not your turn")
-	}
-	if g.St.Rolled {
-		return errors.New("building is only allowed before you roll")
-	}
-	pr := &g.St.Props[sq]
-	s := g.St.Board[sq]
-	if s.Kind != KProperty || pr.Owner != pid {
-		return errors.New("you don't own that property")
-	}
-	if pr.Mortgaged {
-		return errors.New("property is mortgaged")
-	}
-	if pr.Houses >= 5 {
-		return errors.New("already a hotel")
-	}
-	if !g.ownsGroup(pid, s.Group) {
-		return errors.New("you don't own the full color group")
-	}
-	for _, p := range g.St.Players {
-		if p.InJail && !p.Bankrupt && !p.Left {
-			return errors.New("no building while a player is in jail")
-		}
-	}
-	p := &g.St.Players[pid]
-	if p.Cash < houseCost {
-		return errors.New("not enough cash")
-	}
-	// even development rule
-	maxH := 0
-	for _, o := range groups[s.Group] {
-		if g.St.Props[o].Houses > maxH {
-			maxH = g.St.Props[o].Houses
-		}
-	}
-	if pr.Houses > maxH {
-		return errors.New("houses must be built evenly across the group")
-	}
-	p.Cash -= houseCost
-	pr.Houses++
-	if pr.Houses == 5 {
-		g.log("%s builds a hotel on square %d.", p.Name, sq)
-	} else {
-		g.log("%s builds a house on square %d.", p.Name, sq)
-	}
-	return nil
-}
-
-func (g *Game) SellHouse(pid, sq int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "turn" || g.St.Current != pid {
-		return errors.New("not your turn")
-	}
-	if g.St.Rolled {
-		return errors.New("property changes are only allowed before you roll")
-	}
-	pr := &g.St.Props[sq]
-	if g.St.Board[sq].Kind != KProperty || pr.Owner != pid {
-		return errors.New("you don't own that property")
-	}
-	if pr.Houses == 0 {
-		return errors.New("no houses to sell")
-	}
-	p := &g.St.Players[pid]
-	pr.Houses--
-	p.Cash += houseCost / 2
-	g.log("%s sells a house on square %d for $%d.", p.Name, sq, houseCost/2)
-	return nil
-}
-
-func mortValue(buy int) int {
-	v := buy / 2
-	return v - v%5
-}
-
-func (g *Game) Mortgage(pid, sq int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "turn" || g.St.Current != pid {
-		return errors.New("not your turn")
-	}
-	if g.St.Rolled {
-		return errors.New("property changes are only allowed before you roll")
-	}
-	pr := &g.St.Props[sq]
-	s := g.St.Board[sq]
-	if s.Kind != KProperty && s.Kind != KRailroad && s.Kind != KUtility {
-		return errors.New("not a mortgageable square")
-	}
-	if pr.Owner != pid {
-		return errors.New("you don't own that property")
-	}
-	if pr.Mortgaged {
-		return errors.New("already mortgaged")
-	}
-	if pr.Houses > 0 {
-		return errors.New("sell the houses first")
-	}
-	v := mortValue(s.Buy)
-	g.St.Players[pid].Cash += v
-	pr.Mortgaged = true
-	g.log("%s mortgages square %d for $%d.", g.St.Players[pid].Name, sq, v)
-	return nil
-}
-
-func (g *Game) Unmortgage(pid, sq int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "turn" || g.St.Current != pid {
-		return errors.New("not your turn")
-	}
-	if g.St.Rolled {
-		return errors.New("property changes are only allowed before you roll")
-	}
-	pr := &g.St.Props[sq]
-	s := g.St.Board[sq]
-	if pr.Owner != pid || !pr.Mortgaged {
-		return errors.New("not your mortgaged property")
-	}
-	v := int(float64(mortValue(s.Buy)) * 1.1)
-	p := &g.St.Players[pid]
-	if p.Cash < v {
-		return errors.New("not enough cash")
-	}
-	p.Cash -= v
-	pr.Mortgaged = false
-	g.log("%s unmortgages square %d for $%d.", p.Name, sq, v)
-	return nil
-}
-
-// ---------- jail ----------
-
-func (g *Game) PayJail(pid int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "turn" || g.St.Current != pid {
-		return errors.New("not your turn")
-	}
-	p := &g.St.Players[pid]
-	if !p.InJail {
-		return errors.New("not in jail")
-	}
-	if g.St.Rolled {
-		return errors.New("already rolled this turn")
-	}
-	if p.Cash < 50 {
-		return errors.New("not enough cash")
-	}
-	p.Cash -= 50
-	p.InJail = false
-	p.JailTurns = 0
-	g.log("%s pays $50 to get out of jail.", p.Name)
-	return nil
-}
-
-func (g *Game) UseCard(pid int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "turn" || g.St.Current != pid {
-		return errors.New("not your turn")
-	}
-	p := &g.St.Players[pid]
-	if !p.InJail {
-		return errors.New("not in jail")
-	}
-	if g.St.Rolled {
-		return errors.New("already rolled this turn")
-	}
-	if p.Cards == 0 {
-		return errors.New("no get-out-of-jail cards")
-	}
-	p.Cards--
-	p.InJail = false
-	p.JailTurns = 0
-	g.log("%s uses a get-out-of-jail card.", p.Name)
-	return nil
-}
-
-// ---------- auction ----------
-
-const auctionStep = 10
-
-func (g *Game) startAuction(sq, trigger int) {
-	// auction starts at the property's full price: the first bidder can
-	// acquire it for that price if no one else wants it
-	g.St.Auction = &Auction{SQ: sq, Bid: g.St.Board[sq].Buy, Bidder: -1, Trigger: trigger, Passed: []int{}}
-	g.St.Phase = "auction"
-	g.log("Auction for square %d (starting bid $%d).", sq, g.St.Auction.Bid)
-}
-
-func (g *Game) eligibleBidders() []int {
-	var out []int
-	a := g.St.Auction
-	for i, p := range g.St.Players {
-		if i == a.Trigger || p.Bankrupt || p.Left {
-			continue
-		}
-		out = append(out, i)
-	}
-	return out
-}
-
-func (g *Game) AuctionBid(pid, amount int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "auction" {
-		return errors.New("no auction in progress")
-	}
-	a := g.St.Auction
-	if pid == a.Trigger || g.St.Players[pid].Bankrupt || g.St.Players[pid].Left {
-		return errors.New("you can't bid")
-	}
-	for _, p := range a.Passed {
-		if p == pid {
-			return errors.New("you already passed")
-		}
-	}
-	if amount < 0 {
-		return errors.New("bad amount")
-	}
-	if amount%auctionStep != 0 {
-		return fmt.Errorf("bids must be multiples of $%d", auctionStep)
-	}
-	minBid := a.Bid
-	if a.Bidder != -1 {
-		minBid = a.Bid + auctionStep // outbid by at least $10
-	}
-	if amount < minBid {
-		return fmt.Errorf("bid must be at least $%d", minBid)
-	}
-	a.Bid = amount
-	a.Bidder = pid
-	g.log("%s bids $%d on square %d.", g.St.Players[pid].Name, amount, a.SQ)
-	g.finishAuctionIfDone()
-	return nil
-}
-
-func (g *Game) AuctionPass(pid int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "auction" {
-		return errors.New("no auction in progress")
-	}
-	a := g.St.Auction
-	if pid == a.Trigger || g.St.Players[pid].Bankrupt || g.St.Players[pid].Left {
-		return errors.New("you can't pass")
-	}
-	for _, p := range a.Passed {
-		if p == pid {
-			return errors.New("already passed")
-		}
-	}
-	a.Passed = append(a.Passed, pid)
-	g.log("%s passes on the auction.", g.St.Players[pid].Name)
-	g.finishAuctionIfDone()
-	return nil
-}
-
-func (g *Game) finishAuctionIfDone() {
-	a := g.St.Auction
-	if a == nil {
-		return
-	}
-	eligible := g.eligibleBidders()
-	if a.Bidder == -1 {
-		if len(eligible) == len(a.Passed) {
-			g.awardAuction()
-		}
-		return
-	}
-	// all non-bidders must have passed
-	allPassed := true
-	for _, i := range eligible {
-		if i == a.Bidder {
-			continue
-		}
-		passed := false
-		for _, p := range a.Passed {
-			if p == i {
-				passed = true
-				break
-			}
-		}
-		if !passed {
-			allPassed = false
-			break
-		}
-	}
-	if allPassed {
-		g.awardAuction()
-	}
-}
-
-func (g *Game) awardAuction() {
-	a := g.St.Auction
-	if a.Bidder >= 0 && (g.St.Players[a.Bidder].Bankrupt || g.St.Players[a.Bidder].Left) {
-		g.log("Square %d is not sold (bidder out of the game).", a.SQ)
-		g.finishAuction(a.Trigger)
-		return
-	}
-	if a.Bidder >= 0 {
-		w := &g.St.Players[a.Bidder]
-		if a.Bid > w.Cash {
-			g.log("%s wins the auction but cannot pay and goes bankrupt!", w.Name)
-			g.St.Props[a.SQ].Owner = -1
-			g.bankruptTo(a.Bidder, -1)
-		} else {
-			w.Cash -= a.Bid
-			g.St.Props[a.SQ].Owner = a.Bidder
-			g.log("%s wins square %d for $%d.", w.Name, a.SQ, a.Bid)
-		}
-	} else {
-		g.log("Square %d is not sold.", a.SQ)
-	}
-	g.finishAuction(a.Trigger)
-}
-
-// finishAuction closes the auction and advances the turn: the auction was
-// triggered by the current player, whose turn ends with it.
-func (g *Game) finishAuction(trigger int) {
-	g.St.Auction = nil
-	g.St.Phase = "turn"
-	if g.alive() <= 1 {
-		g.endGame()
-		return
-	}
-	g.St.Current = g.nextSurviving(trigger)
-	g.resetTurnState()
-}
-
-// ---------- deals ----------
-
-func (g *Game) ProposeDeal(pid, to int, offer, request Asset) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.St.Phase != "turn" || g.St.Current != pid {
-		return errors.New("you can only propose deals at the start of your own turn")
-	}
-	if g.St.Rolled {
-		return errors.New("you already rolled this turn - deals must come before the roll")
-	}
-	if to == pid {
-		return errors.New("can't deal with yourself")
-	}
-	if to < 0 || to >= len(g.St.Players) {
-		return errors.New("unknown player")
-	}
-	from := &g.St.Players[pid]
-	other := &g.St.Players[to]
-	if from.Bankrupt || from.Left || other.Bankrupt || other.Left {
-		return errors.New("invalid deal participant")
-	}
-	if offer.Cash < 0 || request.Cash < 0 || offer.Cards < 0 || request.Cards < 0 {
-		return errors.New("negative values not allowed")
-	}
-	if offer.Cards > from.Cards {
-		return errors.New("not enough cards")
-	}
-	if !g.ownsAll(from, offer.Props) {
-		return errors.New("you don't own all the properties offered")
-	}
-	if !uniqueProps(request.Props) {
-		return errors.New("duplicate properties requested")
-	}
-	g.nextDeal++
-	g.St.Deals = append(g.St.Deals, Deal{
-		ID: g.nextDeal, From: pid, To: to, Offer: offer, Request: request,
-	})
-	g.log("%s proposes a deal to %s.", from.Name, other.Name)
-	return nil
-}
-
-func uniqueProps(props []int) bool {
-	seen := map[int]bool{}
-	for _, p := range props {
-		if p < 0 || p >= 40 {
-			return false
-		}
-		if seen[p] {
-			return false
-		}
-		seen[p] = true
-	}
-	return true
-}
-
-func (g *Game) ownsAll(p *Player, props []int) bool {
-	if !uniqueProps(props) {
-		return false
-	}
-	for _, sq := range props {
-		if g.St.Props[sq].Owner != p.ID {
-			return false
-		}
-	}
-	return true
-}
-
-func (g *Game) findDeal(id int) *Deal {
-	for i := range g.St.Deals {
-		if g.St.Deals[i].ID == id {
-			return &g.St.Deals[i]
-		}
-	}
-	return nil
-}
-
-func (g *Game) RespondDeal(pid, dealID int, action string, offer, request *Asset) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	d := g.findDeal(dealID)
-	if d == nil {
-		return errors.New("deal not found")
-	}
-	if d.From != pid && d.To != pid {
-		return errors.New("not your deal")
-	}
-	switch action {
-	case "decline":
-		g.log("%s declines deal #%d.", g.St.Players[pid].Name, dealID)
-		g.removeDeal(dealID)
-	case "accept":
-		if err := g.applyDeal(d); err != nil {
-			g.log("Deal #%d failed: %v. Deal cancelled.", dealID, err)
-			g.removeDeal(dealID)
-			return err
-		}
-		g.log("Deal #%d accepted.", dealID)
-		g.removeDeal(dealID)
-	case "counter":
-		if offer == nil || request == nil {
-			return errors.New("counter needs both offer and request")
-		}
-		other := d.From
-		if d.From == pid {
-			other = d.To
-		}
-		me := &g.St.Players[pid]
-		if offer.Cash < 0 || request.Cash < 0 || offer.Cards < 0 || request.Cards < 0 {
-			return errors.New("negative values not allowed")
-		}
-		if offer.Cards > me.Cards {
-			return errors.New("not enough cards")
-		}
-		if !g.ownsAll(me, offer.Props) {
-			return errors.New("you don't own all the properties offered")
-		}
-		if !uniqueProps(request.Props) {
-			return errors.New("duplicate properties requested")
-		}
-		d.From = pid
-		d.To = other
-		d.Offer = *offer
-		d.Request = *request
-		g.log("%s counters deal #%d.", me.Name, dealID)
-	default:
-		return errors.New("unknown action")
-	}
-	return nil
-}
-
-func (g *Game) removeDeal(id int) {
-	for i := range g.St.Deals {
-		if g.St.Deals[i].ID == id {
-			g.St.Deals = append(g.St.Deals[:i], g.St.Deals[i+1:]...)
+			g.log("%s is the new host.", g.St.Players[i].Name)
 			return
 		}
 	}
 }
 
-func (g *Game) applyDeal(d *Deal) error {
-	from := &g.St.Players[d.From]
-	to := &g.St.Players[d.To]
-	if from.Bankrupt || from.Left || to.Bankrupt || to.Left {
-		return errors.New("a deal participant is no longer in the game")
+// ---- turn flow ----
+
+func (g *Game) Roll() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("not the roll phase")
 	}
-	off, req := d.Offer, d.Request
-	if off.Cash > from.Cash || req.Cash > to.Cash {
-		return errors.New("insufficient cash")
+	p := &g.St.Players[g.St.Current]
+	if p.Bankrupt || p.Left {
+		return errors.New("not your turn")
 	}
-	if off.Cards > from.Cards || req.Cards > to.Cards {
-		return errors.New("insufficient cards")
+	g.payUpkeepLocked(p)
+	if g.St.Phase == "over" {
+		return nil
 	}
-	if !g.ownsAll(from, off.Props) {
-		return errors.New("offered properties changed ownership")
+	if p.Bankrupt {
+		g.nextPlayer()
+		return nil
 	}
-	if !g.ownsAll(to, req.Props) {
-		return errors.New("requested properties changed ownership")
+	g.St.Dice = [2]int{1 + g.rng.Intn(6), 1 + g.rng.Intn(6)}
+	g.log("%s rolls %d + %d = %d", p.Name, g.St.Dice[0], g.St.Dice[1], g.St.Dice[0]+g.St.Dice[1])
+	movable := false
+	for _, a := range g.St.Actors {
+		if a.Owner == p.ID && a.Alive && !a.Jailed {
+			movable = true
+			break
+		}
 	}
-	from.Cash += req.Cash - off.Cash
-	to.Cash += off.Cash - req.Cash
-	from.Cards += req.Cards - off.Cards
-	to.Cards += off.Cards - req.Cards
-	for _, sq := range off.Props {
-		g.St.Props[sq].Owner = d.To
+	if !movable {
+		g.log("%s has no free units; the turn is lost.", p.Name)
+		g.nextPlayer()
+		return nil
 	}
-	for _, sq := range req.Props {
-		g.St.Props[sq].Owner = d.From
-	}
-	g.log("%s and %s complete a deal.", from.Name, to.Name)
+	g.St.Phase = "move"
 	return nil
 }
 
-// ---------- cards ----------
+// payUpkeepLocked charges the player $upkeepPerUnit for every living unit.
+// If the treasury can't cover it, the poorest unit is abandoned (captured
+// by the bank) until the bill is paid or the army is gone.
+func (g *Game) payUpkeepLocked(p *Player) {
+	for {
+		units := g.aliveUnits(p.ID)
+		if units == 0 {
+			return
+		}
+		cost := upkeepPerUnit * units
+		if p.Cash >= cost {
+			p.Cash -= cost
+			return
+		}
+		p.Cash = 0
+		worst := -1
+		for i := range g.St.Actors {
+			a := &g.St.Actors[i]
+			if a.Owner == p.ID && a.Alive && (worst < 0 || a.Cash < g.St.Actors[worst].Cash) {
+				worst = i
+			}
+		}
+		if worst < 0 {
+			return
+		}
+		g.log("%s can't pay army upkeep; unit #%d is lost to the field", p.Name, g.St.Actors[worst].ID)
+		g.capture(&g.St.Actors[worst], -1)
+		if g.St.Phase == "over" {
+			return
+		}
+	}
+}
 
-func (g *Game) buildChanceDeck() []card {
-	c := []card{
-		{"Advance to GO.", func(g *Game, p *Player) {
-			start := p.Pos
-			p.Pos = 0
-			if start != 0 {
-				p.Cash += goPayout
-				g.log("%s collects $%d passing GO.", p.Name, goPayout)
+// Move slides one unit in one of the 8 compass directions by the dice sum,
+// bouncing off the walls.
+func (g *Game) Move(actorID, dx, dy int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "move" {
+		return errors.New("not the move phase")
+	}
+	if dx < -1 || dx > 1 || dy < -1 || dy > 1 || (dx == 0 && dy == 0) {
+		return errors.New("bad direction")
+	}
+	a := g.findActor(actorID)
+	if a == nil || !a.Alive || a.Jailed {
+		return errors.New("bad unit")
+	}
+	if a.Owner != g.St.Current {
+		return errors.New("not your unit")
+	}
+	total := g.St.Dice[0] + g.St.Dice[1]
+	nx, ny := a.X, a.Y
+	if dx != 0 {
+		nx = Bounce1d(a.X, dx*total)
+	}
+	if dy != 0 {
+		ny = Bounce1d(a.Y, dy*total)
+	}
+	a.X, a.Y = nx, ny
+	g.log("%s slides unit #%d %s by %d to (%d,%d)",
+		g.St.Players[a.Owner].Name, a.ID, dirName(dx, dy), total, nx, ny)
+	g.resolveLanding(a)
+	return nil
+}
+
+func dirName(dx, dy int) string {
+	v := map[int]string{-1: "-", 0: "·", 1: "+"}
+	return "x" + v[dx] + "y" + v[dy]
+}
+
+func (g *Game) findActor(id int) *Actor {
+	for i := range g.St.Actors {
+		if g.St.Actors[i].ID == id {
+			return &g.St.Actors[i]
+		}
+	}
+	return nil
+}
+
+func (g *Game) baseOwner(cellID int) int {
+	for i := range g.St.Players {
+		if g.St.Players[i].Base == cellID && !g.St.Players[i].Left && !g.St.Players[i].Bankrupt {
+			return i
+		}
+	}
+	return -1
+}
+
+func (g *Game) monopoly(owner, group int) bool {
+	if owner < 0 {
+		return false
+	}
+	for i := range g.St.Cells {
+		c := &g.St.Cells[i]
+		if c.Kind == KProperty && c.Group == group && c.Owner != owner {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *Game) highwayCount(owner int) int {
+	n := 0
+	for i := range g.St.Cells {
+		c := &g.St.Cells[i]
+		if c.Kind == KHighway && c.Owner == owner {
+			n++
+		}
+	}
+	return n
+}
+
+func (g *Game) groupCells(group int) []int {
+	var out []int
+	for i := range g.St.Cells {
+		c := &g.St.Cells[i]
+		if c.Kind == KProperty && c.Group == group {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func (g *Game) resolveLanding(a *Actor) {
+	c := &g.St.Cells[a.Y*Grid+a.X]
+	switch c.Kind {
+	case KBase:
+		own := g.baseOwner(c.Id())
+		if own == a.Owner {
+			a.Cash += baseReward
+			g.log("unit #%d rests at home base: +$%d", a.ID, baseReward)
+		} else if own >= 0 {
+			g.log("unit #%d storms %s's fortress", a.ID, g.St.Players[own].Name)
+			g.charge(a, baseToll, own)
+		}
+	case KProperty:
+		if c.Owner == -1 {
+			g.St.Offer = &BuyOffer{Actor: a.ID, Cell: c.Id()}
+			g.log("unit #%d lands on unclaimed land (%d,%d) for $%d", a.ID, a.X, a.Y, c.Buy)
+		} else if c.Owner != a.Owner && !c.Mortg {
+			r := c.Rent[c.Houses]
+			if g.monopoly(c.Owner, c.Group) {
+				r *= 2
+				g.log("complete block! rent doubled")
 			}
-		}},
-		{"Advance to the nearest railroad. Pay twice the fare.", func(g *Game, p *Player) {
-			g.advanceToTargets(p, []int{5, 14, 25, 38})
-			fare := 25
-			n := 0
-			for i := 0; i < 40; i++ {
-				if g.St.Board[i].Kind == KRailroad && g.St.Props[i].Owner == p.ID {
-					n++
+			g.charge(a, r, c.Owner)
+		}
+	case KHighway:
+		if c.Owner == -1 {
+			g.St.Offer = &BuyOffer{Actor: a.ID, Cell: c.Id()}
+			g.log("unit #%d lands on a highway, $%d to claim", a.ID, c.Buy)
+		} else if c.Owner != a.Owner && !c.Mortg {
+			r := 25 << (g.highwayCount(c.Owner) - 1)
+			g.charge(a, r, c.Owner)
+		}
+	case KBank:
+		a.Cash += bankReward
+		g.log("unit #%d loots the bank: +$%d", a.ID, bankReward)
+	case KJail:
+		if !a.Jailed {
+			a.Jailed = true
+			a.JailTurns = 0
+			g.log("unit #%d is detained in the stockade!", a.ID)
+		}
+	case KChance, KChest:
+		g.card(a, c.Kind == KChance)
+	case KTax:
+		g.log("unit #%d pays tax $%d", a.ID, c.Tax)
+		g.charge(a, c.Tax, -1)
+	case KParking:
+		g.log("unit #%d rests on open ground", a.ID)
+	}
+	if g.St.Phase == "over" {
+		return
+	}
+	if a.Alive {
+		g.occupy(a, c)
+		if g.St.Phase == "over" {
+			return
+		}
+		if g.St.Offer != nil {
+			g.St.Phase = "offer"
+			return
+		}
+	}
+	// the unit may have been captured by the charges above; the turn
+	// still has to advance
+	g.nextPlayer()
+}
+
+// occupy charges a fee for each enemy unit standing on the landed cell.
+func (g *Game) occupy(a *Actor, c *Cell) {
+	fee := occupyFee
+	if c.Kind == KProperty {
+		fee += c.Rent[0] / 2
+	}
+	n := 0
+	for i := range g.St.Actors {
+		e := &g.St.Actors[i]
+		if e.Alive && e.Owner != a.Owner && e.X == a.X && e.Y == a.Y && n < maxOccupy {
+			g.log("unit #%d is blocked by %s's unit #%d: -$%d",
+				a.ID, g.St.Players[e.Owner].Name, e.ID, fee)
+			g.charge(a, fee, e.Owner)
+			n++
+			if !a.Alive || g.St.Phase == "over" {
+				return
+			}
+		}
+	}
+}
+
+func (g *Game) card(a *Actor, chance bool) {
+	r := g.rng.Float64()
+	kind := "chest"
+	if chance {
+		kind = "chance"
+	}
+	switch {
+	case chance && r < 0.30, !chance && r < 0.35:
+		a.Cash += 100
+		g.log("%s: unit #%d finds a supply drop +$100", kind, a.ID)
+	case chance && r < 0.50, !chance && r < 0.55:
+		g.log("%s: unit #%d needs repairs -$50", kind, a.ID)
+		g.charge(a, 50, -1)
+	case chance && r < 0.65, !chance && r < 0.70:
+		b := g.St.Players[a.Owner].Base
+		a.X, a.Y = b%Grid, b/Grid
+		g.log("%s: unit #%d is escorted home (%d,%d)", kind, a.ID, a.X, a.Y)
+	case chance && r < 0.80, !chance && r < 0.85:
+		g.log("%s: all armies tribute $20 to %s", kind, g.St.Players[a.Owner].Name)
+		for i := range g.St.Players {
+			p := &g.St.Players[i]
+			if i != a.Owner && !p.Bankrupt && !p.Left {
+				t := 20
+				if p.Cash < t {
+					t = p.Cash
 				}
+				p.Cash -= t
+				g.St.Players[a.Owner].Cash += t
 			}
-			if n > 0 {
-				fare = 25 << (n - 1)
+		}
+	case chance && r < 0.90, !chance && r < 0.92:
+		g.log("%s: unit #%d's rations are taxed: pay $20 to each enemy", kind, a.ID)
+		for i := range g.St.Players {
+			p := &g.St.Players[i]
+			if i != a.Owner && !p.Bankrupt && !p.Left {
+				t := 20
+				if g.St.Players[a.Owner].Cash < t {
+					t = g.St.Players[a.Owner].Cash
+				}
+				if t == 0 {
+					continue
+				}
+				g.St.Players[a.Owner].Cash -= t
+				p.Cash += t
 			}
-			g.log("%s pays $%d rail fare.", p.Name, fare*2)
-			g.chargeBank(p, fare*2)
-		}},
-		{"Advance to the nearest utility. Pay 10 times your roll.", func(g *Game, p *Player) {
-			g.advanceToTargets(p, []int{12, 28})
-			dice := g.St.Dice[0] + g.St.Dice[1]
-			if dice == 0 {
-				dice = 7
+		}
+	default:
+		if !a.Jailed {
+			a.Jailed = true
+			a.JailTurns = 0
+			g.log("%s: unit #%d is detained in the stockade!", kind, a.ID)
+		}
+	}
+}
+
+// ---- paying, capture, bankruptcy ----
+
+// payActor takes up to amount from the unit then its owner's treasury.
+// Returns the shortfall.
+func (g *Game) payActor(a *Actor, amount, to int) int {
+	paid := 0
+	if a.Cash >= amount {
+		a.Cash -= amount
+		paid = amount
+		amount = 0
+	}
+	if amount > 0 {
+		paid += a.Cash
+		amount -= a.Cash
+		a.Cash = 0
+	}
+	if amount > 0 {
+		own := &g.St.Players[a.Owner]
+		if own.Cash >= amount {
+			own.Cash -= amount
+			paid += amount
+			amount = 0
+		} else {
+			paid += own.Cash
+			amount -= own.Cash
+			own.Cash = 0
+		}
+	}
+	if to >= 0 && paid > 0 {
+		g.St.Players[to].Cash += paid
+	}
+	return amount
+}
+
+// charge makes a unit pay; on shortfall the unit is captured.
+func (g *Game) charge(a *Actor, amount, to int) {
+	if amount <= 0 {
+		return
+	}
+	short := g.payActor(a, amount, to)
+	if short > 0 {
+		g.log("unit #%d cannot pay $%d!", a.ID, amount)
+		g.capture(a, to)
+	}
+}
+
+func (g *Game) capture(a *Actor, to int) {
+	g.log("%s's unit #%d is captured.", g.St.Players[a.Owner].Name, a.ID)
+	a.Alive = false
+	if to >= 0 {
+		g.St.Players[to].Cash += a.Cash
+	}
+	a.Cash = 0
+	g.checkElimination(a.Owner, to)
+}
+
+func (g *Game) aliveUnits(pid int) int {
+	n := 0
+	for _, a := range g.St.Actors {
+		if a.Owner == pid && a.Alive {
+			n++
+		}
+	}
+	return n
+}
+
+func (g *Game) checkElimination(pid, to int) {
+	p := &g.St.Players[pid]
+	if p.Bankrupt || p.Left {
+		return
+	}
+	if g.aliveUnits(pid) == 0 {
+		g.bankruptTo(pid, to)
+	}
+}
+
+func (g *Game) bankruptTo(pid, to int) {
+	p := &g.St.Players[pid]
+	if p.Bankrupt || p.Left {
+		return
+	}
+	g.log("%s's army is destroyed — bankrupt!", p.Name)
+	p.Bankrupt = true
+	for i := range g.St.Actors {
+		a := &g.St.Actors[i]
+		if a.Owner == pid && a.Alive {
+			a.Alive = false
+			if to >= 0 {
+				g.St.Players[to].Cash += a.Cash
 			}
-			g.log("%s pays $%d to the utility company.", p.Name, dice*10)
-			g.chargeBank(p, dice*10)
-		}},
-		{"The bank pays you $50.", func(g *Game, p *Player) { p.Cash += 50 }},
-		{"Get Out of Jail Free.", func(g *Game, p *Player) {
-			p.Cards++
-			if p.InJail {
-				p.InJail = false
-				p.JailTurns = 0
-				g.log("%s gets out of jail.", p.Name)
+			a.Cash = 0
+		}
+	}
+	if to >= 0 {
+		w := &g.St.Players[to]
+		w.Cash += p.Cash
+		for i := range g.St.Cells {
+			c := &g.St.Cells[i]
+			if c.Owner == pid {
+				w.Cash += c.Houses * houseSell
+				c.Owner = to
+				c.Houses = 0
+				c.Mortg = false
 			}
-		}},
-		{"Go directly to jail.", func(g *Game, p *Player) { g.toJail(p) }},
-		{"Go back 3 spaces.", func(g *Game, p *Player) { p.Pos = (p.Pos + 37) % 40 }},
-		{"Income tax refund. The bank pays you $20.", func(g *Game, p *Player) { p.Cash += 20 }},
-		{"Make house repairs: $25 per house, $110 per hotel.", func(g *Game, p *Player) {
-			total := 0
-			for i := range g.St.Props {
-				if g.St.Props[i].Owner == p.ID {
-					h := g.St.Props[i].Houses
-					if h == 5 {
-						total += 110
-					} else {
-						total += h * 25
+		}
+		g.log("%s seizes %s's treasury and territory.", w.Name, p.Name)
+	} else {
+		for i := range g.St.Cells {
+			c := &g.St.Cells[i]
+			if c.Owner == pid {
+				c.Owner = -1
+				c.Houses = 0
+				c.Mortg = false
+			}
+		}
+	}
+	p.Cash = 0
+	g.checkWinner()
+}
+
+func (g *Game) checkWinner() {
+	n, winner := 0, -1
+	for i := range g.St.Players {
+		p := &g.St.Players[i]
+		if !p.Bankrupt && !p.Left && p.Name != "" {
+			n++
+			winner = i
+		}
+	}
+	if n == 1 {
+		g.St.Phase = "over"
+		g.St.Winner = winner
+		g.log("%s wins the war!", g.St.Players[winner].Name)
+	}
+}
+
+func (g *Game) nextPlayer() {
+	if g.St.Phase == "over" {
+		return
+	}
+	g.St.Offer = nil
+	for i := 0; i < 4; i++ {
+		pid := (g.St.Current + 1 + i) % 4
+		p := &g.St.Players[pid]
+		if !p.Bankrupt && !p.Left && p.Name != "" {
+			g.St.Current = pid
+			for i := range g.St.Actors {
+				a := &g.St.Actors[i]
+				if a.Owner == pid && a.Alive && a.Jailed {
+					a.JailTurns++
+					if a.JailTurns >= jailMaxTurns {
+						a.Jailed = false
+						a.JailTurns = 0
+						g.log("%s's unit #%d is released from the stockade.", p.Name, a.ID)
 					}
 				}
 			}
-			if total > 0 {
-				g.log("%s pays $%d in repairs.", p.Name, total)
-				g.chargeBank(p, total)
-			}
-		}},
-		{"Advance to square 11.", func(g *Game, p *Player) {
-			g.advanceToSquare(p, 11)
-		}},
-		{"Speeding fine. Pay $15.", func(g *Game, p *Player) { g.chargeBank(p, 15) }},
-		{"You are elected chairman. Pay each other player $50.", func(g *Game, p *Player) {
-			total := 0
-			for i := range g.St.Players {
-				if i != p.ID && !g.St.Players[i].Bankrupt && !g.St.Players[i].Left {
-					g.St.Players[i].Cash += 50
-					total += 50
-				}
-			}
-			if total > 0 {
-				g.chargeBank(p, total)
-			}
-		}},
-		{"Your building loan matures. The bank pays you $150.", func(g *Game, p *Player) { p.Cash += 150 }},
-		{"Doctor's fee. Pay $50.", func(g *Game, p *Player) { g.chargeBank(p, 50) }},
-		{"Second prize in a beauty contest. The bank pays you $10.", func(g *Game, p *Player) { p.Cash += 10 }},
-		{"You inherit $100 from a distant relative.", func(g *Game, p *Player) { p.Cash += 100 }},
-	}
-	g.shuffle(c)
-	return c
-}
-
-func (g *Game) buildChestDeck() []card {
-	c := []card{
-		{"Advance to GO.", func(g *Game, p *Player) {
-			start := p.Pos
-			p.Pos = 0
-			if start != 0 {
-				p.Cash += goPayout
-				g.log("%s collects $%d passing GO.", p.Name, goPayout)
-			}
-		}},
-		{"Bank error in your favor. The bank pays you $200.", func(g *Game, p *Player) { p.Cash += 200 }},
-		{"Doctor's fee. Pay $50.", func(g *Game, p *Player) { g.chargeBank(p, 50) }},
-		{"Go back 3 spaces.", func(g *Game, p *Player) { p.Pos = (p.Pos + 37) % 40 }},
-		{"Get Out of Jail Free.", func(g *Game, p *Player) {
-			p.Cards++
-			if p.InJail {
-				p.InJail = false
-				p.JailTurns = 0
-				g.log("%s gets out of jail.", p.Name)
-			}
-		}},
-		{"Income tax. Pay $200.", func(g *Game, p *Player) { g.chargeBank(p, 200) }},
-		{"You inherit $100.", func(g *Game, p *Player) { p.Cash += 100 }},
-		{"Life insurance matures. The bank pays you $100.", func(g *Game, p *Player) { p.Cash += 100 }},
-		{"Medicine. Pay $50.", func(g *Game, p *Player) { g.chargeBank(p, 50) }},
-		{"School fees. Pay $15.", func(g *Game, p *Player) { g.chargeBank(p, 15) }},
-		{"You found a stray check. The bank pays you $100.", func(g *Game, p *Player) { p.Cash += 100 }},
-		{"Wedding. Pay $50.", func(g *Game, p *Player) { g.chargeBank(p, 50) }},
-		{"You won a crossword prize. The bank pays you $100.", func(g *Game, p *Player) { p.Cash += 100 }},
-		{"Birthday. The bank pays you $10.", func(g *Game, p *Player) { p.Cash += 10 }},
-		{"Consultancy fees. The bank pays you $10.", func(g *Game, p *Player) { p.Cash += 10 }},
-		{"Income tax refund. The bank pays you $20.", func(g *Game, p *Player) { p.Cash += 20 }},
-	}
-	g.shuffle(c)
-	return c
-}
-
-func (g *Game) shuffle(c []card) {
-	g.rng.Shuffle(len(c), func(i, j int) { c[i], c[j] = c[j], c[i] })
-}
-
-func (g *Game) draw(which string) card {
-	if which == "Chance" {
-		if len(g.chance) == 0 {
-			g.chance = g.buildChanceDeck()
-		}
-		c := g.chance[len(g.chance)-1]
-		g.chance = g.chance[:len(g.chance)-1]
-		g.St.DeckLeft[0] = len(g.chance)
-		return c
-	}
-	if len(g.chest) == 0 {
-		g.chest = g.buildChestDeck()
-	}
-	c := g.chest[len(g.chest)-1]
-	g.chest = g.chest[:len(g.chest)-1]
-	g.St.DeckLeft[1] = len(g.chest)
-	return c
-}
-
-func (g *Game) advanceToTargets(p *Player, targets []int) {
-	best, bestDist := -1, 100
-	for _, t := range targets {
-		d := (t - p.Pos + 40) % 40
-		if d == 0 {
-			d = 40
-		}
-		if d < bestDist {
-			best, bestDist = t, d
+			g.log("— %s's turn —", p.Name)
+			g.St.Phase = "roll"
+			return
 		}
 	}
-	if best >= 0 {
-		start := p.Pos
-		p.Pos = (start + bestDist) % 40
-		if start+bestDist >= 40 {
-			p.Cash += goPayout
-			g.log("%s collects $%d passing GO.", p.Name, goPayout)
+	g.St.Phase = "over"
+}
+
+// ---- buy / decline / auction ----
+
+func (g *Game) Buy() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "offer" || g.St.Offer == nil {
+		return errors.New("no purchase pending")
+	}
+	a := g.findActor(g.St.Offer.Actor)
+	if a == nil || !a.Alive || a.Owner != g.St.Current {
+		return errors.New("not your unit")
+	}
+	c := &g.St.Cells[g.St.Offer.Cell]
+	if c.Owner != -1 {
+		return errors.New("already owned")
+	}
+	if a.Cash+g.St.Players[a.Owner].Cash < c.Buy {
+		return errors.New("not enough funds (unit cash + treasury)")
+	}
+	g.payActor(a, c.Buy, -1)
+	c.Owner = a.Owner
+	g.log("%s buys (%d,%d) for $%d", g.St.Players[a.Owner].Name, c.X, c.Y, c.Buy)
+	g.St.Offer = nil
+	g.nextPlayer()
+	return nil
+}
+
+func (g *Game) Decline() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "offer" || g.St.Offer == nil {
+		return errors.New("no purchase pending")
+	}
+	cellID := g.St.Offer.Cell
+	c := &g.St.Cells[cellID]
+	g.log("%s passes on (%d,%d); it goes to auction.",
+		g.St.Players[g.St.Current].Name, c.X, c.Y)
+	g.St.Offer = nil
+	g.St.Auction = &Auction{
+		Cell:   cellID,
+		Bid:    c.Buy,
+		Bidder: -1,
+		From:   g.St.Current,
+	}
+	g.St.Phase = "auction"
+	return nil
+}
+
+func (g *Game) AuctionBid(amount int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "auction" || g.St.Auction == nil {
+		return errors.New("no auction")
+	}
+	p := &g.St.Players[g.St.Current]
+	if p.Bankrupt || p.Left {
+		return errors.New("not your turn")
+	}
+	if g.auctionPassed(p.ID) {
+		return errors.New("you already passed")
+	}
+	if amount%auctionStep != 0 {
+		return errors.New("bids must be multiples of $10")
+	}
+	if amount < g.St.Auction.Bid+auctionStep {
+		return errors.New("bid too low")
+	}
+	if p.Cash < amount {
+		return errors.New("not enough treasury")
+	}
+	g.St.Auction.Bid = amount
+	g.St.Auction.Bidder = p.ID
+	g.St.Auction.Passed = g.auctionRemove(g.St.Auction.Passed, p.ID)
+	g.log("%s bids $%d", p.Name, amount)
+	g.auctionCheck()
+	return nil
+}
+
+func (g *Game) AuctionPass() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "auction" || g.St.Auction == nil {
+		return errors.New("no auction")
+	}
+	p := &g.St.Players[g.St.Current]
+	if p.Bankrupt || p.Left {
+		return errors.New("not your turn")
+	}
+	if g.auctionPassed(p.ID) {
+		return errors.New("you already passed")
+	}
+	g.St.Auction.Passed = append(g.St.Auction.Passed, p.ID)
+	g.log("%s passes", p.Name)
+	g.auctionCheck()
+	return nil
+}
+
+func (g *Game) auctionPassed(pid int) bool {
+	for _, p := range g.St.Auction.Passed {
+		if p == pid {
+			return true
 		}
 	}
+	return false
 }
 
-func (g *Game) advanceToSquare(p *Player, target int) {
-	d := (target - p.Pos + 40) % 40
-	if d == 0 {
-		d = 40
+func (g *Game) auctionRemove(list []int, pid int) []int {
+	out := list[:0]
+	for _, p := range list {
+		if p != pid {
+			out = append(out, p)
+		}
 	}
-	start := p.Pos
-	p.Pos = (start + d) % 40
-	if start+d >= 40 {
-		p.Cash += goPayout
-		g.log("%s collects $%d passing GO.", p.Name, goPayout)
-	}
+	return out
 }
 
-func (g *Game) applyCard(c card, p *Player) {
-	g.log("%s draws: %s", p.Name, c.text)
-	c.apply(g, p)
+func (g *Game) auctionAllOthersPassed(except int) bool {
+	for i := range g.St.Players {
+		p := &g.St.Players[i]
+		if i == except || p.Bankrupt || p.Left || p.Name == "" {
+			continue
+		}
+		if !g.auctionPassed(i) {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *Game) auctionCheck() {
+	a := g.St.Auction
+	if a.Bidder != -1 && g.auctionAllOthersPassed(a.Bidder) {
+		w := &g.St.Players[a.Bidder]
+		w.Cash -= a.Bid
+		c := &g.St.Cells[a.Cell]
+		c.Owner = a.Bidder
+		g.log("%s wins (%d,%d) at $%d", w.Name, c.X, c.Y, a.Bid)
+		g.endAuction()
+		return
+	}
+	if g.auctionAllOthersPassed(-1) {
+		g.log("everyone passes; (%d,%d) stays unclaimed.",
+			g.St.Cells[a.Cell].X, g.St.Cells[a.Cell].Y)
+		g.endAuction()
+		return
+	}
+	// advance to the next player who has not passed
+	for i := 0; i < 4; i++ {
+		pid := (g.St.Current + 1 + i) % 4
+		p := &g.St.Players[pid]
+		if !p.Bankrupt && !p.Left && p.Name != "" && !g.auctionPassed(pid) {
+			g.St.Current = pid
+			return
+		}
+	}
+	g.endAuction()
+}
+
+func (g *Game) endAuction() {
+	from := g.St.Auction.From
+	g.St.Auction = nil
+	g.St.Current = from
+	g.nextPlayer()
+}
+
+// ---- army management (roll phase only) ----
+
+func (g *Game) Fund(actorID, amount int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("not the roll phase")
+	}
+	a := g.findActor(actorID)
+	if a == nil || !a.Alive || a.Owner != g.St.Current {
+		return errors.New("bad unit")
+	}
+	if amount <= 0 || amount > g.St.Players[a.Owner].Cash {
+		return errors.New("bad amount")
+	}
+	g.St.Players[a.Owner].Cash -= amount
+	a.Cash += amount
+	g.log("%s transfers $%d to unit #%d", g.St.Players[a.Owner].Name, amount, a.ID)
+	return nil
+}
+
+func (g *Game) Recall(actorID int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("not the roll phase")
+	}
+	a := g.findActor(actorID)
+	if a == nil || !a.Alive || a.Owner != g.St.Current {
+		return errors.New("bad unit")
+	}
+	if g.aliveUnits(a.Owner) <= 1 {
+		return errors.New("you must keep at least one unit")
+	}
+	g.St.Players[a.Owner].Cash += a.Cash
+	a.Alive = false
+	a.Cash = 0
+	g.log("%s recalls unit #%d (its cash returns to the treasury)",
+		g.St.Players[a.Owner].Name, actorID)
+	return nil
+}
+
+func (g *Game) Reinforce() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("not the roll phase")
+	}
+	p := &g.St.Players[g.St.Current]
+	if p.Bankrupt || p.Left {
+		return errors.New("not your turn")
+	}
+	if g.aliveUnits(p.ID) >= maxActors {
+		return errors.New("army is at full strength")
+	}
+	if p.Cash < actorCost {
+		return errors.New("not enough treasury")
+	}
+	p.Cash -= actorCost
+	g.St.Actors = append(g.St.Actors, Actor{
+		ID:    g.St.NextID,
+		Owner: p.ID,
+		X:     p.Base % Grid,
+		Y:     p.Base / Grid,
+		Cash:  actorFunds,
+		Alive: true,
+	})
+	g.log("%s recruits unit #%d for $%d", p.Name, g.St.NextID, actorCost)
+	g.St.NextID++
+	return nil
+}
+
+func (g *Game) Build(cellID int, sell bool) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("not the roll phase")
+	}
+	p := &g.St.Players[g.St.Current]
+	if p.Bankrupt || p.Left {
+		return errors.New("not your turn")
+	}
+	c := &g.St.Cells[cellID]
+	if c.Kind != KProperty || c.Owner != p.ID {
+		return errors.New("not your property")
+	}
+	if sell {
+		if c.Houses == 0 {
+			return errors.New("no houses to sell")
+		}
+		c.Houses--
+		p.Cash += houseSell
+		g.log("%s sells a house on (%d,%d) for $%d", p.Name, c.X, c.Y, houseSell)
+		return nil
+	}
+	if c.Mortg {
+		return errors.New("cell is mortgaged")
+	}
+	if c.Houses >= maxHouses {
+		return errors.New("full")
+	}
+	if !g.monopoly(p.ID, c.Group) {
+		return errors.New("you do not own the whole block")
+	}
+	if p.Cash < houseCost {
+		return errors.New("not enough treasury")
+	}
+	p.Cash -= houseCost
+	c.Houses++
+	g.log("%s builds a house on (%d,%d)", p.Name, c.X, c.Y)
+	return nil
+}
+
+func (g *Game) Mortgage(cellID int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("not the roll phase")
+	}
+	p := &g.St.Players[g.St.Current]
+	if p.Bankrupt || p.Left {
+		return errors.New("not your turn")
+	}
+	c := &g.St.Cells[cellID]
+	if c.Kind != KProperty || c.Owner != p.ID || c.Mortg {
+		return errors.New("bad cell")
+	}
+	if c.Houses > 0 {
+		return errors.New("sell houses first")
+	}
+	c.Mortg = true
+	p.Cash += c.Buy / 2
+	g.log("%s mortgages (%d,%d) for $%d", p.Name, c.X, c.Y, c.Buy/2)
+	return nil
+}
+
+func (g *Game) Unmortgage(cellID int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("not the roll phase")
+	}
+	p := &g.St.Players[g.St.Current]
+	if p.Bankrupt || p.Left {
+		return errors.New("not your turn")
+	}
+	c := &g.St.Cells[cellID]
+	if c.Kind != KProperty || c.Owner != p.ID || !c.Mortg {
+		return errors.New("bad cell")
+	}
+	cost := c.Buy * 55 / 100
+	if p.Cash < cost {
+		return errors.New("not enough treasury")
+	}
+	p.Cash -= cost
+	c.Mortg = false
+	g.log("%s unmortgages (%d,%d) for $%d", p.Name, c.X, c.Y, cost)
+	return nil
+}
+
+func (g *Game) PayJail(actorID int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("not the roll phase")
+	}
+	a := g.findActor(actorID)
+	if a == nil || !a.Alive || a.Owner != g.St.Current || !a.Jailed {
+		return errors.New("bad unit")
+	}
+	p := &g.St.Players[a.Owner]
+	if p.Cash < jailFine {
+		return errors.New("not enough treasury")
+	}
+	p.Cash -= jailFine
+	a.Jailed = false
+	a.JailTurns = 0
+	g.log("%s bails out unit #%d for $%d", p.Name, a.ID, jailFine)
+	return nil
+}
+
+// ---- deals ----
+
+func (g *Game) ProposeDeal(to int, give, want Asset) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("deals only before the roll")
+	}
+	p := &g.St.Players[g.St.Current]
+	if p.Bankrupt || p.Left {
+		return errors.New("not your turn")
+	}
+	if to < 0 || to >= 4 || to == p.ID {
+		return errors.New("bad target")
+	}
+	t := &g.St.Players[to]
+	if t.Bankrupt || t.Left {
+		return errors.New("target is out")
+	}
+	if give.Cash < 0 || want.Cash < 0 {
+		return errors.New("bad amount")
+	}
+	if p.Cash < give.Cash || t.Cash < want.Cash {
+		return errors.New("cannot afford the deal")
+	}
+	for _, c := range give.Props {
+		if g.St.Cells[c].Owner != p.ID {
+			return errors.New("you do not own that cell")
+		}
+	}
+	for _, c := range want.Props {
+		if g.St.Cells[c].Owner != to {
+			return errors.New("target does not own that cell")
+		}
+	}
+	for _, c := range give.Props {
+		for _, d := range want.Props {
+			if c == d {
+				return errors.New("overlapping cells")
+			}
+		}
+	}
+	g.St.Deals = append(g.St.Deals, Deal{
+		ID:     g.St.NextDeal,
+		From:   p.ID,
+		To:     to,
+		Give:   give,
+		Want:   want,
+		Status: "open",
+	})
+	g.St.NextDeal++
+	g.log("%s offers a deal to %s", p.Name, t.Name)
+	return nil
+}
+
+func (g *Game) RespondDeal(id int, accept bool) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.St.Phase != "roll" {
+		return errors.New("deals only before the roll")
+	}
+	di := -1
+	for i := range g.St.Deals {
+		if g.St.Deals[i].ID == id && g.St.Deals[i].Status == "open" {
+			di = i
+			break
+		}
+	}
+	if di == -1 {
+		return errors.New("no such deal")
+	}
+	d := &g.St.Deals[di]
+	if d.To != g.St.Current {
+		return errors.New("not your deal")
+	}
+	d.Status = "declined"
+	if !accept {
+		g.log("%s declines a deal from %s", g.St.Players[d.To].Name, g.St.Players[d.From].Name)
+		g.dropDeal(di)
+		return nil
+	}
+	f := &g.St.Players[d.From]
+	t := &g.St.Players[d.To]
+	if f.Cash < d.Give.Cash || t.Cash < d.Want.Cash {
+		return errors.New("deal can no longer be afforded")
+	}
+	f.Cash += d.Want.Cash - d.Give.Cash
+	t.Cash += d.Give.Cash - d.Want.Cash
+	for _, c := range d.Give.Props {
+		g.St.Cells[c].Owner = d.To
+	}
+	for _, c := range d.Want.Props {
+		g.St.Cells[c].Owner = d.From
+	}
+	g.log("deal concluded: %s <-> %s", f.Name, t.Name)
+	g.dropDeal(di)
+	return nil
+}
+
+func (g *Game) dropDeal(i int) {
+	g.St.Deals = append(g.St.Deals[:i], g.St.Deals[i+1:]...)
 }

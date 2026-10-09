@@ -1,55 +1,65 @@
-# Monopoly (web, multiplayer)
+# Monopoly 2D — Grid War (experimental branch `2d`)
 
-Classic Monopoly for 2–4 players in the browser, with one extra rule:
-**players can trade with each other** — money, properties (houses & mortgage
-status transfer with them) and get-out-of-jail-free cards, with full
-accept / counter / decline negotiation.
+A non-standard Monopoly experiment: instead of a 40-square circle, the game
+happens on a **9×9 grid**, and instead of one pawn per player you command a
+small **army of units** with their own funds.
 
-Everything else follows the classic rules:
-- roll & move, doubles (3 in a row → jail), $200 for passing GO
-- buy / decline (decline or unable-to-pay starts an **auction** the landing
-  player can't bid on)
-- rent: color groups (double rent on a full unimproved set), houses/hotels
-  with the even-development rule, railroads (25/50/100/200), utilities
-  (4×/10× the dice)
-- mortgages & unmortgages (10% premium)
-- jail: pay $50, use a card, or roll doubles (3 tries, then pay)
-- taxes, chance & community chest decks (reshuffle when empty)
-- bankruptcy: assets transfer to the creditor (or the bank), last player
-  standing wins
+## How it differs from classic Monopoly
 
-Square names are intentionally not assigned yet — squares are shown by
-number, color group, price and rent.
+- **2D board, billiards movement.** Roll two dice, pick **one unit** and one
+  of **8 compass directions**. It slides the dice total and **bounces off the
+  walls** (mirror reflection), landing where the reflected ray ends. The
+  server validates the endpoint deterministically.
+- **Armies.** You start with **3 units** (each holding $200) plus a **$1500
+  treasury**. Before rolling you can:
+  - **Fund** a unit (treasury → unit, e.g. +$50/+$100)
+  - **Recall** a unit (it disappears, cash returns to the treasury)
+  - **Recruit** a new unit at your base for **$300** (max 6 units)
+  - Build houses / mortgage / propose deals (treasury money)
+- **Front lines.** Landing on a cell occupied by **enemy units** costs an
+  **occupation fee** per enemy unit ($25 + half the base rent on
+  properties). Positioning matters: hold the high-traffic lanes.
+- **Capture.** A debt (rent, toll, occupation, tax, card) that the unit *and*
+  its treasury cannot cover means the unit is **captured** — the enemy takes
+  its remaining cash as spoils. Lose **all** your units and you are
+  eliminated (treasury + territory transfer to the captor).
+- **Bases.** The 4 corners are fortresses, one per player. Landing on yours:
+  **+$100**. Landing on an enemy's: pay a **$50 toll**.
+- **2×2 property blocks.** The 8 color groups are 2×2 squares; owning a whole
+  block doubles rent and unlocks houses (up to 4). Highways (🛣️) work like
+  railroads: $25 → $50 → $100 → $200.
+- **Everything else**: bank (+$100), stockade/jail (bail $50 or wait 3
+  turns), taxes, chance & chest cards, buy → decline → **auction** (bids in
+  $10 steps from treasury), player-to-player **deals** (cash + cells).
+- **Army upkeep**: at the start of each turn you pay the bank **$10 per
+  surviving unit**. Can't pay? Your poorest unit is abandoned. Big armies
+  are expensive — overextension is a real threat.
+- **Win**: last army standing.
 
 ## Run
 
 ```sh
-go run .            # serves http://localhost:8080
-PORT=9000 go run .  # custom port
+go run .          # http://localhost:8080   (PORT env to change)
+go test ./...
 ```
 
-Open the URL on any device (desktop or phone), enter a name, join.
-The first player (host) starts the game once 2+ players are connected.
-All clients stay in sync over WebSockets; the server is authoritative.
+Open the URL on 2–4 devices, join, host starts.
 
-## Layout
+## Files
 
-- `main.go` — HTTP server, WebSocket hub, action dispatch
-- `board.go` — the 40-square board definition (kinds, groups, prices, rents)
-- `game.go` — all game logic: turns, movement, rent, jail, auction,
-  building, mortgages, deals, bankruptcy, cards
-- `web/` — single-page client (vanilla JS, no build step):
-  - `index.html`, `style.css` — responsive 11×11 board layout (vmin-based,
-    works in portrait & landscape on phones)
-  - `app.js` — WebSocket client, rendering, action buttons, deal modal
-- `*_test.go` — unit tests (deal flow/validation, bankruptcy transfers),
-  a WebSocket end-to-end smoke test, and a 60-game AI self-play test that
-  checks for hangs and state invariants
+- `board.go` — 9×9 map (ASCII layout), cell table, bounce math
+- `game.go` — rules engine (turns, movement, occupation, capture, rent,
+  buildings, auction, deals, jail, bankruptcy, host/lobby)
+- `main.go` — HTTP + WebSocket hub (keep-alive ping/pong, host removal)
+- `web/` — responsive client (board grid, army panel, 8-way d-pad with
+  bounce preview, deal modal)
 
-## Deal protocol (client → server)
+## Protocol (client → server)
 
-- `propose_deal {to, offer{cash,props[],cards}, request{...}}`
-- `respond_deal {dealId, action: accept|decline|counter, offer, request}`
+`join, start, roll, move{actor,dx,dy}, buy, decline, fund{actor,amount},
+recall{actor}, reinforce, build{cell,sell}, mortgage{cell}, unmortgage{cell},
+pay_jail{actor}, auction_bid{amount}, auction_pass, propose_deal{to,give,want},
+respond_deal{deal,accept}, lobby, remove{to}`
 
-A deal is only applied when the accepting side has enough cash/props/cards;
-otherwise it is cancelled with a log entry.
+Full game state (players, units, cells, dice, auction, deals, log) is
+broadcast after every action.
