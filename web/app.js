@@ -431,15 +431,27 @@ function openDealModal(deal) {
   const others = state.players.filter((p) => !p.left && !p.bankrupt && p.id !== myId);
   if (!others.length) { toast("No one to deal with"); return; }
   const otherId = deal ? (deal.from === myId ? deal.to : deal.from) : others[0].id;
+  renderDealModal(deal, others, {
+    otherId,
+    give: deal
+      ? { cash: deal.from === myId ? deal.offer.cash : deal.request.cash,
+          props: deal.from === myId ? deal.offer.props : deal.request.props,
+          cards: deal.from === myId ? deal.offer.cards : deal.request.cards }
+      : { cash: 0, props: [], cards: 0 },
+    get: deal
+      ? { cash: deal.from === myId ? deal.request.cash : deal.offer.cash,
+          props: deal.from === myId ? deal.request.props : deal.offer.props,
+          cards: deal.from === myId ? deal.request.cards : deal.offer.cards }
+      : { cash: 0, props: [], cards: 0 },
+  });
+}
+
+function renderDealModal(deal, others, draft) {
+  const otherId = draft.otherId;
   const me = state.players[myId];
   const other = state.players[otherId];
-
-  const giveProps = deal ? (deal.from === myId ? deal.offer.props : deal.request.props) : [];
-  const getProps = deal ? (deal.from === myId ? deal.request.props : deal.offer.props) : [];
-  const giveCash = deal ? (deal.from === myId ? deal.offer.cash : deal.request.cash) : 0;
-  const getCash = deal ? (deal.from === myId ? deal.request.cash : deal.offer.cash) : 0;
-  const giveCards = deal ? (deal.from === myId ? deal.offer.cards : deal.request.cards) : 0;
-  const getCards = deal ? (deal.from === myId ? deal.request.cards : deal.offer.cards) : 0;
+  const { give: { cash: giveCash, props: giveProps, cards: giveCards },
+          get: { cash: getCash, props: getProps, cards: getCards } } = draft;
 
   const propCheckboxes = (owner, preselected, prefix) => {
     const owned = state.props
@@ -453,7 +465,7 @@ function openDealModal(deal) {
 
   openModal(`
     <h2>${deal ? "Counter deal #" + deal.id : "Propose a deal"}</h2>
-    <div class="mrow">With: <select id="dOther">${others.map((p) => `<option value="${p.id}" ${p.id === otherId ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
+    <div class="mrow">With: <select id="dOther" ${deal ? "disabled" : ""}>${others.map((p) => `<option value="${p.id}" ${p.id === otherId ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
     <h3>You give</h3>
     <div class="mrow">Cash: <input type="number" id="dGiveCash" min="0" value="${giveCash || 0}"></div>
     <div class="mrow" style="align-items:flex-start">${propCheckboxes(myId, giveProps, "dGiveProp")}</div>
@@ -468,6 +480,23 @@ function openDealModal(deal) {
     </div>
   `);
   $("dCancel").onclick = closeModal;
+  // Re-render the "You get" side whenever the counterparty changes: properties
+  // and cards belong to a specific player, so keep only what still applies.
+  $("dOther").onchange = () => {
+    renderDealModal(deal, others, {
+      otherId: +$("dOther").value,
+      give: {
+        cash: +($("dGiveCash").value || 0),
+        props: [...document.querySelectorAll(".dGiveProp:checked")].map((c) => +c.dataset.sq),
+        cards: $("dGiveCard").checked ? 1 : 0,
+      },
+      get: {
+        cash: +($("dGetCash").value || 0),
+        props: [],
+        cards: 0,
+      },
+    });
+  };
   $("dSend").onclick = () => {
     const to = +$("dOther").value;
     const offer = {
